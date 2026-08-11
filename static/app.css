@@ -1,0 +1,23 @@
+:root { color-scheme: light; font-family: system-ui, "Noto Sans TC", sans-serif; background: #f3f5f7; color: #1c252e; }
+body { margin: 0; }
+main { width: min(900px, calc(100% - 32px)); margin: 24px auto; }
+header { display: flex; justify-content: space-between; gap: 16px; align-items: center; }
+h1 { margin-bottom: 4px; } header p { margin-top: 0; color: #53606b; }
+.actions { display: flex; gap: 8px; align-items: center; }
+button, a { border: 0; border-radius: 8px; padding: 10px 14px; font: inherit; cursor: pointer; }
+a { color: #075a8c; background: #e2f1fa; text-decoration: none; }
+button { color: white; background: #075a8c; }
+#clear { background: #5d6872; }
+#messages { min-height: 360px; background: white; border-radius: 12px; padding: 16px; box-shadow: 0 2px 12px #10203014; }
+.message { max-width: 80%; margin: 10px 0; padding: 12px; border-radius: 10px; white-space: pre-wrap; }
+.user { margin-left: auto; background: #dff0fa; }
+.assistant { background: #eef1f3; }
+.citations { margin-top: 8px; font-size: .9rem; color: #45525d; }
+.citations img { display: block; max-width: 240px; margin-top: 8px; border-radius: 6px; }
+.item-question { display: block; margin-bottom: 8px; color: #33414c; }
+.assistant pre { overflow-x: auto; padding: 10px; border-radius: 6px; background: #17212b; color: #f4f7f9; }
+.assistant code { font-family: ui-monospace, Consolas, monospace; }
+form { margin-top: 16px; } label { display: block; margin-bottom: 6px; }
+.composer { display: flex; gap: 8px; } textarea { flex: 1; resize: vertical; border: 1px solid #aab3ba; border-radius: 8px; padding: 10px; font: inherit; }
+#status { min-height: 1.4em; color: #9c2f22; }
+@media (max-width: 640px) { header { align-items: flex-start; flex-direction: column; } .message { max-width: 92%; } }

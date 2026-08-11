@@ -1,0 +1,9 @@
+.agents/
+.env
+__pycache__/
+*.py[cod]
+runtime/
+models/
+input/
+.pytest_cache/
+AGENTS.md

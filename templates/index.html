@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>廠商文件問答</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+</head>
+<body>
+  <main>
+    <header>
+      <div><h1>廠商文件問答</h1><p>回答僅依據目前載入的 PDF 文件。</p></div>
+      <div class="actions"><button id="clear" type="button">清除對話</button><button id="end-chat" type="button">結束對話</button></div>
+    </header>
+    <section id="messages" aria-live="polite"></section>
+    <form id="chat-form">
+      <label for="question">請輸入文件相關問題</label>
+      <div class="composer"><textarea id="question" rows="2" required></textarea><button id="send" type="submit">送出</button></div>
+      <p id="status" role="status"></p>
+    </form>
+  </main>
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
