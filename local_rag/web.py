@@ -16,13 +16,20 @@ from .session_log import SessionJsonlLogger
 SESSION_PATTERN = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
 
 
-def create_app(*, config: AppConfig, embedding_backend, chat_backend) -> Flask:
+def create_app(
+    *,
+    config: AppConfig,
+    embedding_backend,
+    chat_backend,
+    build_root: Path,
+    output_root: Path,
+) -> Flask:
     app = Flask(
         __name__,
         template_folder=str(config.base_dir / "templates"),
         static_folder=str(config.base_dir / "static"),
     )
-    index = FileVectorIndex.load(config.index_root / "current")
+    index = FileVectorIndex.load(build_root, output_root=output_root)
     session_logger = SessionJsonlLogger(
         config.session_log_root,
         enabled=config.session_log_enabled,
@@ -108,8 +115,9 @@ def create_app(*, config: AppConfig, embedding_backend, chat_backend) -> Flask:
         record = artifact_records.get(record_id)
         if record is None or record.source.artifact_path is None:
             return jsonify(error_code="crop_not_found", message="圖片不存在"), 404
-        candidate = (index.snapshot_root / record.source.artifact_path).resolve()
-        if index.snapshot_root not in candidate.parents or not candidate.is_file():
+        candidate = (index.output_root / record.source.artifact_path).resolve()
+        crops_root = (index.output_root / "crops").resolve()
+        if crops_root not in candidate.parents or not candidate.is_file():
             return jsonify(error_code="crop_not_found", message="圖片不存在"), 404
         return send_file(candidate, conditional=True)
 

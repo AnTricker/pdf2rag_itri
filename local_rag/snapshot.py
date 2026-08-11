@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import shutil
 from pathlib import Path
-from typing import Optional, Union
+from typing import Union
 from uuid import uuid4
 
 import numpy as np
@@ -12,50 +12,39 @@ import numpy as np
 from .models import BuildReport, CorpusProfile, KnowledgeRecord, SnapshotManifest
 
 
-class SnapshotWriter:
-    def __init__(self, index_root: Path) -> None:
-        self.index_root = index_root
+class BuildWriter:
+    def __init__(self, output_root: Path, review_version: int) -> None:
+        self.output_root = output_root.resolve()
+        self.review_version = review_version
 
     def write(
         self,
         *,
-        source_pdf: Path,
         records: list[KnowledgeRecord],
         embeddings: np.ndarray,
         manifest: SnapshotManifest,
         report: BuildReport,
-        crop_artifacts: Optional[list[Path]] = None,
         corpus_profile: CorpusProfile,
     ) -> Path:
-        self.index_root.mkdir(parents=True, exist_ok=True)
-        stage = self.index_root / f".stage-{uuid4().hex}"
+        builds_root = self.output_root / "builds"
+        builds_root.mkdir(parents=True, exist_ok=True)
+        destination = builds_root / f"{self.review_version:03d}"
+        if destination.exists():
+            raise FileExistsError(f"build already exists: {destination}")
+
+        stage = builds_root / f".stage-{uuid4().hex}"
         stage.mkdir()
         try:
-            document_dir = stage / "document"
-            document_dir.mkdir()
-            shutil.copy2(source_pdf, document_dir / source_pdf.name)
-            if crop_artifacts:
-                crop_dir = stage / "crops"
-                crop_dir.mkdir()
-                for crop in crop_artifacts:
-                    shutil.copy2(crop, crop_dir / crop.name)
             self._write_jsonl(stage / "records.jsonl", records)
-            self._write_pretty(stage / "records.pretty.json", records)
             self._write_json(stage / "corpus_profile.json", corpus_profile)
             np.save(stage / "embeddings.npy", embeddings, allow_pickle=False)
             records_sha256 = self._sha256(stage / "records.jsonl")
             embeddings_sha256 = self._sha256(stage / "embeddings.npy")
-            artifact_sha256 = {
-                path.relative_to(stage).as_posix(): self._sha256(path)
-                for path in sorted(stage.rglob("*"))
-                if path.is_file()
-                and (
-                    path.parent.name in {"document", "crops"}
-                    or path.name in {"records.pretty.json", "corpus_profile.json"}
-                )
-            }
+            artifact_sha256 = self._referenced_crop_hashes(records)
             snapshot_id = hashlib.sha256(
-                f"{manifest.document_sha256}:{records_sha256}:{embeddings_sha256}".encode("ascii")
+                f"{manifest.document_sha256}:{records_sha256}:{embeddings_sha256}".encode(
+                    "ascii"
+                )
             ).hexdigest()[:24]
             completed_manifest = manifest.model_copy(
                 update={
@@ -68,11 +57,24 @@ class SnapshotWriter:
             completed_report = report.model_copy(update={"snapshot_id": snapshot_id})
             self._write_json(stage / "manifest.json", completed_manifest)
             self._write_json(stage / "build_report.json", completed_report)
-            self._validate(stage)
-            return self._promote(stage)
+            self._validate(stage, self.output_root)
+            stage.replace(destination)
+            return destination
         except Exception:
             shutil.rmtree(stage, ignore_errors=True)
             raise
+
+    def _referenced_crop_hashes(
+        self, records: list[KnowledgeRecord]
+    ) -> dict[str, str]:
+        hashes: dict[str, str] = {}
+        for record in records:
+            relative_path = record.source.artifact_path
+            if not relative_path:
+                continue
+            artifact = self._resolve_crop(self.output_root, relative_path)
+            hashes[relative_path] = self._sha256(artifact)
+        return dict(sorted(hashes.items()))
 
     @staticmethod
     def _write_jsonl(path: Path, records: list[KnowledgeRecord]) -> None:
@@ -90,71 +92,52 @@ class SnapshotWriter:
             encoding="utf-8",
         )
 
-    @staticmethod
-    def _write_pretty(path: Path, records: list[KnowledgeRecord]) -> None:
-        output = []
-        for record in records:
-            source = record.source.model_dump(exclude={"document_sha256"})
-            processing = record.processing.model_dump(exclude={"content_sha256"})
-            output.append(
-                {
-                    "modality": record.modality,
-                    "language": record.language,
-                    "content": record.content,
-                    "source": source,
-                    "processing": processing,
-                    "image": record.image.model_dump() if record.image else None,
-                }
-            )
-        path.write_text(
-            json.dumps(output, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-
-    @staticmethod
-    def _validate(stage: Path) -> None:
-        record_lines = (stage / "records.jsonl").read_text(
+    @classmethod
+    def _validate(cls, build_root: Path, output_root: Path) -> None:
+        record_lines = (build_root / "records.jsonl").read_text(
             encoding="utf-8"
         ).splitlines()
-        vectors = np.load(stage / "embeddings.npy", allow_pickle=False)
+        vectors = np.load(build_root / "embeddings.npy", allow_pickle=False)
         manifest = SnapshotManifest.model_validate_json(
-            (stage / "manifest.json").read_text(encoding="utf-8")
+            (build_root / "manifest.json").read_text(encoding="utf-8")
         )
         corpus_profile = CorpusProfile.model_validate_json(
-            (stage / "corpus_profile.json").read_text(encoding="utf-8")
+            (build_root / "corpus_profile.json").read_text(encoding="utf-8")
         )
         if corpus_profile.document_id != manifest.document_sha256:
             raise ValueError("corpus profile document identifier mismatch")
-        if vectors.dtype != np.float32:
-            raise ValueError("embeddings.npy must contain float32 vectors")
-        if vectors.ndim != 2:
-            raise ValueError("embeddings.npy must be a two-dimensional matrix")
+        if vectors.dtype != np.float32 or vectors.ndim != 2:
+            raise ValueError("invalid embedding matrix")
         expected = (manifest.record_count, manifest.vector_dimension)
         if vectors.shape != expected or len(record_lines) != manifest.record_count:
-            raise ValueError("snapshot record/vector counts do not match manifest")
+            raise ValueError("build record/vector counts do not match manifest")
         if not np.isfinite(vectors).all():
             raise ValueError("embeddings.npy contains non-finite values")
-        if SnapshotWriter._sha256(stage / "records.jsonl") != manifest.records_sha256:
+        if cls._sha256(build_root / "records.jsonl") != manifest.records_sha256:
             raise ValueError("records checksum mismatch")
-        if SnapshotWriter._sha256(stage / "embeddings.npy") != manifest.embeddings_sha256:
+        if cls._sha256(build_root / "embeddings.npy") != manifest.embeddings_sha256:
             raise ValueError("embeddings checksum mismatch")
-        documents = list((stage / "document").iterdir())
-        if len(documents) != 1 or SnapshotWriter._sha256(documents[0]) != manifest.document_sha256:
-            raise ValueError("document checksum mismatch")
-        if corpus_profile.document_name != documents[0].name:
-            raise ValueError("corpus profile document name mismatch")
         for relative_path, expected_hash in manifest.artifact_sha256.items():
-            artifact = (stage / relative_path).resolve()
-            if stage.resolve() not in artifact.parents or not artifact.is_file():
-                raise ValueError("manifest references an invalid artifact path")
-            if SnapshotWriter._sha256(artifact) != expected_hash:
+            artifact = cls._resolve_crop(output_root, relative_path)
+            if cls._sha256(artifact) != expected_hash:
                 raise ValueError("artifact checksum mismatch")
         for line in record_lines:
             record = KnowledgeRecord.model_validate_json(line)
+            if record.document_id != manifest.document_sha256:
+                raise ValueError("record document identifier mismatch")
             if record.source.artifact_path:
-                artifact = (stage / record.source.artifact_path).resolve()
-                if stage.resolve() not in artifact.parents or not artifact.is_file():
-                    raise ValueError("record references an invalid artifact path")
+                cls._resolve_crop(output_root, record.source.artifact_path)
+
+    @staticmethod
+    def _resolve_crop(output_root: Path, relative_path: str) -> Path:
+        normalized = Path(relative_path)
+        if normalized.is_absolute() or normalized.parts[:1] != ("crops",):
+            raise ValueError("crop artifact path must be relative to crops/")
+        candidate = (output_root / normalized).resolve()
+        crops_root = (output_root / "crops").resolve()
+        if crops_root not in candidate.parents or not candidate.is_file():
+            raise ValueError("record references an invalid crop artifact")
+        return candidate
 
     @staticmethod
     def _sha256(path: Path) -> str:
@@ -163,17 +146,3 @@ class SnapshotWriter:
             for chunk in iter(lambda: source.read(1024 * 1024), b""):
                 digest.update(chunk)
         return digest.hexdigest()
-
-    def _promote(self, stage: Path) -> Path:
-        current = self.index_root / "current"
-        backup = self.index_root / f".previous-{uuid4().hex}"
-        if current.exists():
-            current.replace(backup)
-        try:
-            stage.replace(current)
-        except Exception:
-            if backup.exists():
-                backup.replace(current)
-            raise
-        shutil.rmtree(backup, ignore_errors=True)
-        return current

@@ -37,11 +37,20 @@ reference DEMO 老人六力衛教 chatbot : http://104.43.109.53:8060/chat
 > Develop Rule👨‍💻: 先在 **開發端💻** 試架pipeline到確定"裝環境+模型設定即可開跑"，再轉移到 **算力端🖥️**跑大模型、大量實驗
 
 ---
+### 812
+- (雙端)測試VLM caption的更新，同步到github
+- amd速架一個對外ip
+- github branch要分離出develop跟deploy；amd對外ip應該用deployed的 (那邊folder怎麼開??)
+- 看一下文件，了解目前harness logic
+
+- 同步測試SDK的實作成果
+
 ### 811
 - 拍攝CMP書本(iphone拍照，VLM可以直接讀.heic?)
 - 同步雙邊README，上傳github，方便未來雙邊同步
 - 修正當前override runtime/index/ 的機制，index{time}/ 儲存每次結果 & 於.env或是serve的commands指定每次RAG的db
   - 內部加入manual_caption_comments.md，手動審閱caption結果
+- ✅caption機制更新，待測試
 
 ### 807
 (prior 前~後)

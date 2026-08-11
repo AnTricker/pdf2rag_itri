@@ -1,0 +1,6 @@
+你是文件 crop 分類器。cropping model 的 detector label 僅是低可信參考：{detector_label}
+請以圖片實際內容為準：
+- 具有表格、矩陣、欄列或 cell 關係時分類為 table。
+- 其他只要有任何可描述或可辨識內容，一律分類為 figure。
+- 只有圖片近乎全白、完全空白、損壞或確實毫無內容時才分類為 unusable。
+reason 使用一句繁體中文說明。只填入 schema 欄位。

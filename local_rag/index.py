@@ -22,12 +22,14 @@ class FileVectorIndex:
         self,
         *,
         snapshot_root: Path,
+        output_root: Path,
         records: list[KnowledgeRecord],
         vectors: np.ndarray,
         manifest: SnapshotManifest,
         corpus_profile: CorpusProfile,
     ) -> None:
         self.snapshot_root = snapshot_root
+        self.output_root = output_root
         self.records = records
         self.vectors = vectors
         self.manifest = manifest
@@ -41,8 +43,15 @@ class FileVectorIndex:
         )
 
     @classmethod
-    def load(cls, snapshot_root: Path) -> "FileVectorIndex":
+    def load(
+        cls, snapshot_root: Path, *, output_root: Optional[Path] = None
+    ) -> "FileVectorIndex":
         root = snapshot_root.resolve(strict=True)
+        output = (
+            output_root.resolve(strict=True)
+            if output_root is not None
+            else root.parents[1]
+        )
         manifest = SnapshotManifest.model_validate_json(
             (root / "manifest.json").read_text(encoding="utf-8")
         )
@@ -59,13 +68,12 @@ class FileVectorIndex:
             raise ValueError("records checksum mismatch")
         if cls._sha256(root / "embeddings.npy") != manifest.embeddings_sha256:
             raise ValueError("embeddings checksum mismatch")
-        documents = list((root / "document").iterdir())
-        if len(documents) != 1 or cls._sha256(documents[0]) != manifest.document_sha256:
-            raise ValueError("document checksum mismatch")
+
+        crops_root = (output / "crops").resolve()
         for relative_path, expected_hash in manifest.artifact_sha256.items():
-            artifact = (root / relative_path).resolve()
-            if root not in artifact.parents or not artifact.is_file():
-                raise ValueError("manifest artifact path is invalid")
+            artifact = (output / relative_path).resolve()
+            if crops_root not in artifact.parents or not artifact.is_file():
+                raise ValueError("manifest crop path is invalid")
             if cls._sha256(artifact) != expected_hash:
                 raise ValueError("artifact checksum mismatch")
         if vectors.dtype != np.float32 or vectors.ndim != 2:
@@ -77,6 +85,7 @@ class FileVectorIndex:
             raise ValueError("snapshot counts or dimensions do not match")
         return cls(
             snapshot_root=root,
+            output_root=output,
             records=records,
             vectors=vectors,
             manifest=manifest,

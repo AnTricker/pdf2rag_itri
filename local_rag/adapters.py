@@ -20,9 +20,13 @@ from .models import (
     EvidenceDraft,
     ExtractedPage,
     FinalAnswer,
+    FigureExtraction,
     ImageCandidate,
-    ImageCaption,
+    ImageClassification,
     KnowledgeRecord,
+    TableExtraction,
+    TableExtractionDraft,
+    TableSummary,
     QuestionSplit,
     RetrievalQueryPlan,
 )
@@ -155,36 +159,92 @@ class UltralyticsImagePipeline:
         return candidates
 
 
-class OllamaCaptionBackend:
+class OllamaImageReviewBackend:
     name = "ollama"
-    prompt_version = "image-caption-v1"
 
-    def __init__(self, config: AppConfig, prompt: str) -> None:
+    def __init__(
+        self,
+        config: AppConfig,
+        *,
+        classifier_prompt: str,
+        table_extractor_prompt: str,
+        table_summary_prompt: str,
+        figure_extractor_prompt: str,
+    ) -> None:
         if not config.vlm_model:
             raise ValueError("LOCAL_RAG_VLM_MODEL is required")
         self.url = config.vlm_url
         self.model_name = config.vlm_model
         self.timeout = config.vlm_timeout_seconds
-        self.prompt = prompt
+        self.classifier_prompt = classifier_prompt
+        self.table_extractor_prompt = table_extractor_prompt
+        self.table_summary_prompt = table_summary_prompt
+        self.figure_extractor_prompt = figure_extractor_prompt
+        self.prompt_versions = {
+            "image_classifier": "image-classifier-v1",
+            "table_extractor": "table-extractor-v1",
+            "table_summary": "table-summary-v1",
+            "figure_extractor": "figure-extractor-v1",
+        }
 
-    def describe(self, crop_path: Path) -> ImageCaption:
+    def _structured(self, prompt: str, schema_type, *, image_path: Optional[Path] = None):
         import base64
 
-        response = requests.post(
-            f"{self.url}/api/generate",
-            json={
+        last_error: Optional[Exception] = None
+        for _attempt in range(2):
+            payload = {
                 "model": self.model_name,
-                "prompt": self.prompt,
-                "images": [base64.b64encode(crop_path.read_bytes()).decode("ascii")],
-                "format": ImageCaption.model_json_schema(),
+                "prompt": prompt,
+                "format": schema_type.model_json_schema(),
                 "stream": False,
-            },
-            timeout=self.timeout,
-        )
-        response.raise_for_status()
-        payload = response.json()
-        return ImageCaption.model_validate_json(payload["response"])
+            }
+            if image_path is not None:
+                payload["images"] = [
+                    base64.b64encode(image_path.read_bytes()).decode("ascii")
+                ]
+            try:
+                response = requests.post(
+                    f"{self.url}/api/generate",
+                    json=payload,
+                    timeout=self.timeout,
+                )
+                response.raise_for_status()
+                return schema_type.model_validate_json(response.json()["response"])
+            except Exception as error:
+                last_error = error
+        assert last_error is not None
+        raise last_error
 
+    def classify(
+        self, crop_path: Path, detector_label: str
+    ) -> ImageClassification:
+        return self._structured(
+            self.classifier_prompt.format(detector_label=detector_label),
+            ImageClassification,
+            image_path=crop_path,
+        )
+
+    def extract_table(self, crop_path: Path) -> TableExtractionDraft:
+        return self._structured(
+            self.table_extractor_prompt,
+            TableExtractionDraft,
+            image_path=crop_path,
+        )
+
+    def summarize_table(self, extraction: TableExtraction) -> TableSummary:
+        return self._structured(
+            self.table_summary_prompt.format(
+                table_json=json.dumps(extraction.model_dump(), ensure_ascii=False)
+            ),
+            TableSummary,
+        )
+
+    def extract_figure(self, crop_path: Path) -> FigureExtraction:
+        return self._structured(
+            self.figure_extractor_prompt,
+            FigureExtraction,
+            image_path=crop_path,
+        )
 
 class OllamaCorpusProfileBackend:
     name = "ollama"

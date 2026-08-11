@@ -6,7 +6,6 @@ from pathlib import Path
 import requests
 
 from .config import AppConfig
-from .index import FileVectorIndex
 
 
 def run_doctor(config: AppConfig) -> tuple[bool, list[dict[str, object]]]:
@@ -15,7 +14,7 @@ def run_doctor(config: AppConfig) -> tuple[bool, list[dict[str, object]]]:
     def add(name: str, ready: bool, detail: str) -> None:
         checks.append({"name": name, "ready": ready, "detail": detail})
 
-    add("index_root", config.index_root.parent.exists(), str(config.index_root))
+    add("outputs_root", config.index_root.parent.exists(), str(config.index_root))
     input_ready = config.input_pdf is None or config.input_pdf.is_file()
     add("input_pdf", input_ready, str(config.input_pdf) if config.input_pdf else "not configured")
     image_enabled = config.ingest_mode in {"image", "multi"}
@@ -35,11 +34,7 @@ def run_doctor(config: AppConfig) -> tuple[bool, list[dict[str, object]]]:
         add("detector_model", True, "not required in text mode")
     embedding_ready = bool(config.embedding_model) and Path(config.embedding_model).expanduser().exists()
     add("embedding_model", embedding_ready, config.embedding_model or "not configured")
-    try:
-        FileVectorIndex.load(config.index_root / "current")
-        add("snapshot", True, "valid")
-    except Exception:
-        add("snapshot", False, "missing or invalid")
+
     for name, url, model in (
         ("llm", config.llm_url, config.llm_model),
         ("vlm", config.vlm_url, config.vlm_model),

@@ -27,7 +27,6 @@ class AppConfig:
     base_dir: Path
     index_root: Path
     ingest_mode: str = "multi"
-    corpus_profile_override: Optional[Path] = None
     profile_max_records: int = 40
     input_pdf: Optional[Path] = None
     log_root: Optional[Path] = None
@@ -77,19 +76,12 @@ class AppConfig:
         llm_model_value = get("LOCAL_RAG_LLM_MODEL", "").strip()
         vlm_model_value = get("LOCAL_RAG_VLM_MODEL", "").strip() or llm_model_value
         poppler_value = get("LOCAL_RAG_POPPLER_PATH", "").strip()
-        profile_override_value = get(
-            "LOCAL_RAG_CORPUS_PROFILE_OVERRIDE",
-            "config/corpus_profile.override.json",
-        ).strip()
+
         config = cls(
             base_dir=base,
-            index_root=_relative_path(base, get("LOCAL_RAG_INDEX_ROOT", "runtime/index")),
+            index_root=_relative_path(base, get("LOCAL_RAG_INDEX_ROOT", "runtime/outputs")),
             ingest_mode=get("LOCAL_RAG_INGEST_MODE", "multi").strip().lower(),
-            corpus_profile_override=(
-                _relative_path(base, profile_override_value)
-                if profile_override_value
-                else None
-            ),
+
             profile_max_records=int(get("LOCAL_RAG_PROFILE_MAX_RECORDS", "40")),
             input_pdf=_relative_path(base, input_value) if input_value else None,
             log_root=_relative_path(base, get("LOCAL_RAG_LOG_ROOT", "runtime/logs")),

@@ -3,102 +3,127 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import re
 from pathlib import Path
 from urllib.parse import quote
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_SNAPSHOT = REPO_ROOT / "runtime" / "index" / "current"
-IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
+DEFAULT_OUTPUTS_ROOT = REPO_ROOT / "runtime" / "outputs"
+OUTPUT_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}-\d{6}$")
+REVIEW_PATTERN = re.compile(r"^(\d+)_records\.pretty\.json$")
 
 
 def table_text(value: object) -> str:
     text = html.escape(str(value), quote=False).replace("|", "&#124;")
     return text.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "<br>")
 
-def build_review(snapshot_dir: Path) -> str:
-    crops_dir = snapshot_dir / "crops"
-    if not crops_dir.is_dir():
-        raise FileNotFoundError(f"crop directory not found: {crops_dir}")
 
-    records_path = snapshot_dir / "records.pretty.json"
-    records = json.loads(records_path.read_text(encoding="utf-8"))
+def latest_review(pending_root: Path) -> tuple[int, Path]:
+    candidates = []
+    for path in pending_root.iterdir():
+        match = REVIEW_PATTERN.fullmatch(path.name)
+        if match and path.is_file():
+            candidates.append((int(match.group(1)), path))
+    if not candidates:
+        raise FileNotFoundError("output has no review revisions")
+    return max(candidates, key=lambda item: item[0])
+
+
+def caption_text(record: dict[str, object]) -> str:
+    content_type = record.get("content_type")
+    if content_type == "table":
+        return table_text(
+            json.dumps(
+                {
+                    "extraction": record.get("table_extraction"),
+                    "summary": record.get("table_summary"),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+    if content_type == "figure":
+        return table_text(
+            json.dumps(
+                record.get("figure_extraction"),
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+    return ""
+
+
+def build_review(review_path: Path) -> str:
+    payload = json.loads(review_path.read_text(encoding="utf-8"))
+    records = payload.get("records")
     if not isinstance(records, list):
-        raise ValueError(f"expected a JSON array: {records_path}")
+        raise ValueError(f"expected review envelope records: {review_path}")
 
-    captions_by_artifact: dict[str, list[dict[str, object]]] = {}
-    for record in records:
-        if not isinstance(record, dict) or record.get("modality") != "image":
-            continue
-        source = record.get("source")
-        if not isinstance(source, dict) or not isinstance(source.get("artifact_path"), str):
-            continue
-        captions_by_artifact.setdefault(source["artifact_path"], []).append(record)
-
-    images = sorted(
-        path
-        for path in crops_dir.iterdir()
-        if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES
-    )
     lines = [
         "# Manual Review",
         "",
-        "### 記錄每張圖片問題",
+        f"Source: {review_path.name}",
         "",
         "|filename|Pic|type|caption|",
         "|---|---|---|---|",
     ]
-    for image in images:
-        artifact_path = f"crops/{image.name}"
-        image_path = f"crops/{quote(image.name)}"
-        blocks = captions_by_artifact.get(artifact_path, [])
-        type_parts = []
-        caption_parts = []
-        for index, block in enumerate(blocks, start=1):
-            image_metadata = block.get("image")
-            detector_label = (
-                image_metadata.get("detector_label", "")
-                if isinstance(image_metadata, dict)
-                else ""
-            )
-            type_parts.append(f"[{index}] {table_text(detector_label)}")
-            caption_parts.append(
-                f"[{index}] language: {table_text(block.get('language', ''))}"
-                f"<br>content: {table_text(block.get('content', ''))}"
-            )
+    for record in records:
+        if not isinstance(record, dict) or record.get("modality") != "image":
+            continue
+        source = record.get("source")
+        if not isinstance(source, dict):
+            continue
+        artifact_path = source.get("artifact_path")
+        if not isinstance(artifact_path, str):
+            continue
+        filename = Path(artifact_path).name
+        image_path = quote(artifact_path.replace("\\", "/"))
         lines.append(
-            f"|{table_text(image.name)}|![{image.name}]({image_path})|"
-            f"{'<br>'.join(type_parts)}|{'<br><br>'.join(caption_parts)}|"
+            f"|{table_text(filename)}|![{filename}]({image_path})|"
+            f"{table_text(record.get('content_type') or '')}|"
+            f"{caption_text(record)}|"
         )
     return "\n".join(lines) + "\n"
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Generate a Markdown checklist for manually reviewing crop captions."
+        description="Generate Markdown from a reviewable output revision."
     )
+    parser.add_argument("--output", required=True, help="timestamp output identifier")
+    parser.add_argument("--review", type=int, help="review version; defaults to latest")
     parser.add_argument(
-        "--snapshot",
+        "--outputs-root",
         type=Path,
-        default=DEFAULT_SNAPSHOT,
-        help="snapshot directory containing crops/ (default: runtime/index/current)",
+        default=DEFAULT_OUTPUTS_ROOT,
+        help="configured outputs root",
     )
-    parser.add_argument(
-        "--force",
-        action="store_true",
-        help="overwrite an existing manual_caption_review.md",
-    )
+    parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
 
-    snapshot_dir = args.snapshot.resolve()
-    output_path = snapshot_dir / "manual_caption_review.md"
-    if output_path.exists() and not args.force:
-        parser.error(f"output already exists; use --force to overwrite: {output_path}")
+    if not OUTPUT_PATTERN.fullmatch(args.output):
+        parser.error("output must be a timestamp identifier")
+    outputs_root = args.outputs_root.resolve()
+    output_root = (outputs_root / args.output).resolve(strict=True)
+    if output_root.parent != outputs_root:
+        parser.error("output escapes outputs root")
 
-    content = build_review(snapshot_dir)
-    output_path.write_text(content, encoding="utf-8")
-    image_count = content.count("|![")
-    print(f"Wrote {output_path} with {image_count} images")
+    if args.review is None:
+        version, review_path = latest_review(output_root / "pending")
+    else:
+        version = args.review
+        review_path = (
+            output_root / "pending" / f"{version:03d}_records.pretty.json"
+        )
+        if not review_path.is_file():
+            parser.error(f"review not found: {review_path}")
+
+    output_path = output_root / f"manual_caption_review_{version:03d}.md"
+    if output_path.exists() and not args.force:
+        parser.error(f"output already exists; use --force: {output_path}")
+    output_path.write_text(build_review(review_path), encoding="utf-8")
+    print(output_path)
     return 0
 
 

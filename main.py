@@ -6,15 +6,14 @@ from pathlib import Path
 from typing import Optional
 
 from local_rag.adapters import (
-    OllamaCaptionBackend,
     OllamaChatBackend,
     OllamaCorpusProfileBackend,
+    OllamaImageReviewBackend,
     PypdfTextExtractor,
     SentenceTransformerEmbeddingBackend,
     UltralyticsImagePipeline,
 )
 from local_rag.application import PdfRagApplication
-from local_rag.cli import run_cli
 from local_rag.config import AppConfig
 from local_rag.doctor import run_doctor
 from local_rag.web import create_app
@@ -35,69 +34,114 @@ def embedding_backend(config: AppConfig) -> SentenceTransformerEmbeddingBackend:
     )
 
 
-def ingestion_application(config: AppConfig, mode: str) -> PdfRagApplication:
-    embedding = embedding_backend(config)
-    image_enabled = mode in {"image", "multi"}
-    image_pipeline = (
-        UltralyticsImagePipeline(config)
-        if image_enabled and config.detector_model
-        else None
+def image_review_backend(config: AppConfig) -> OllamaImageReviewBackend:
+    return OllamaImageReviewBackend(
+        config,
+        classifier_prompt=read_prompt("image_classifier_v1.txt"),
+        table_extractor_prompt=read_prompt("table_extractor_v1.txt"),
+        table_summary_prompt=read_prompt("table_summary_v1.txt"),
+        figure_extractor_prompt=read_prompt("figure_extractor_v1.txt"),
     )
-    caption = None
-    if image_enabled and image_pipeline is not None and config.vlm_model:
-        caption = OllamaCaptionBackend(config, read_prompt("image_caption_v1.txt"))
-    profile = None
-    if not (
-        config.corpus_profile_override
-        and config.corpus_profile_override.is_file()
-    ):
-        profile = OllamaCorpusProfileBackend(
-            config,
-            read_prompt("corpus_profile_v1.txt"),
-        )
+
+
+def pipeline_application(
+    config: AppConfig,
+    *,
+    include_image_pipeline: bool,
+    include_image_review: bool,
+    include_profile: bool,
+) -> PdfRagApplication:
     return PdfRagApplication(
         config=config,
         text_extractor=PypdfTextExtractor(),
-        embedding_backend=embedding,
-        image_pipeline=image_pipeline,
-        caption_backend=caption,
-        profile_backend=profile,
+        embedding_backend=embedding_backend(config),
+        image_pipeline=(
+            UltralyticsImagePipeline(config) if include_image_pipeline else None
+        ),
+        image_review_backend=(
+            image_review_backend(config) if include_image_review else None
+        ),
+        profile_backend=(
+            OllamaCorpusProfileBackend(
+                config,
+                read_prompt("corpus_profile_v1.txt"),
+            )
+            if include_profile
+            else None
+        ),
     )
 
 
 def main(argv: Optional[list[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description="Portable local PDF RAG MVP")
+    parser = argparse.ArgumentParser(description="Reviewable local PDF RAG pipeline")
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("doctor")
+
     ingest = subparsers.add_parser("ingest")
     ingest.add_argument("--input", type=Path)
     ingest.add_argument("--mode", choices=("text", "image", "multi"))
-    subparsers.add_parser("serve")
+
+    review = subparsers.add_parser("review")
+    review.add_argument("--output", required=True)
+
+    build = subparsers.add_parser("build")
+    build.add_argument("--output", required=True)
+    build.add_argument("--review", required=True, type=int)
+
+    serve = subparsers.add_parser("serve")
+    serve.add_argument("--output", required=True)
+
     args = parser.parse_args(argv)
     config = AppConfig.from_env(BASE_DIR)
 
     if args.command == "doctor":
         ready, checks = run_doctor(config)
-        print(json.dumps({"ready": ready, "checks": checks}, ensure_ascii=False, indent=2))
+        print(
+            json.dumps(
+                {"ready": ready, "checks": checks},
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
         return 0 if ready else 1
+
     if args.command == "ingest":
         source = args.input or config.input_pdf
         if source is None:
             parser.error("ingest requires --input or LOCAL_RAG_INPUT_PDF")
-        selected_mode = args.mode or config.ingest_mode
-        ingest_args = [
-            "ingest",
-            "--input",
-            str(source),
-            "--mode",
-            selected_mode,
-        ]
-        return run_cli(
-            ingest_args,
-            application_factory=lambda: ingestion_application(
-                config, selected_mode
-            ),
+        mode = args.mode or config.ingest_mode
+        app = pipeline_application(
+            config,
+            include_image_pipeline=mode in {"image", "multi"},
+            include_image_review=mode in {"image", "multi"},
+            include_profile=False,
         )
+        output_root = app.ingest(source, mode=mode)
+        print(output_root.name)
+        return 0
+
+    if args.command == "review":
+        app = pipeline_application(
+            config,
+            include_image_pipeline=False,
+            include_image_review=True,
+            include_profile=False,
+        )
+        review_path = app.review(args.output)
+        print(review_path)
+        return 0
+
+    if args.command == "build":
+        app = pipeline_application(
+            config,
+            include_image_pipeline=False,
+            include_image_review=False,
+            include_profile=True,
+        )
+        build_path = app.build(args.output, args.review)
+        print(build_path)
+        return 0
+
     if args.command == "serve":
         embedding = embedding_backend(config)
         chat = OllamaChatBackend(
@@ -108,7 +152,20 @@ def main(argv: Optional[list[str]] = None) -> int:
             evidence_draft_prompt=read_prompt("evidence_draft_v1.txt"),
             final_answer_prompt=read_prompt("final_answer_v2.txt"),
         )
-        app = create_app(config=config, embedding_backend=embedding, chat_backend=chat)
+        resolver = PdfRagApplication(
+            config=config,
+            text_extractor=PypdfTextExtractor(),
+            embedding_backend=embedding,
+        )
+        output_root = resolver.resolve_output(args.output)
+        build_root = resolver.latest_build(output_root)
+        app = create_app(
+            config=config,
+            embedding_backend=embedding,
+            chat_backend=chat,
+            build_root=build_root,
+            output_root=output_root,
+        )
         app.run(host=config.web_host, port=config.web_port, debug=False)
         return 0
     return 2
