@@ -144,6 +144,8 @@ elif record.content_type == "figure":
 
 API schema validation失敗時，同一任務立即重試一次；仍失敗就保持欄位缺少，未來 review 會再次嘗試。
 
+VLM 任務在重試後仍失敗時，ingest／review 會先保留已完成的 crops 與 pretty revision，再於 stderr 列出失敗階段、圖片路徑、原因與完成統計，並以非零 exit code 結束。保留 artifacts 代表可供後續 review 重試，不代表本次 CLI 執行成功。
+
 ## 5. Backend data contracts
 
 Classifier 只輸出 content_type 與繁中 reason。detector label 是弱提示，只存在 pretty。unusable 僅用於近乎空白、完全損壞或確實無內容的 crop。
@@ -156,9 +158,11 @@ Table extractor 輸出 title、notes 與所有 cells。每個 cell 包含原文 
 - 驗證 summary evidence IDs。
 - 逐 cell 生成 deterministic retrieval content。
 
-正式 table Record 同時保存 structured cells 與 retrieval content，一表一 Record。若完整 content 超過 embedding token limit，build 失敗，不截斷或省略 notes。
+正式 table／figure 資料在 build 時轉成 schema 2.1 image chunks：同一 crop 共享 deterministic `image_group_id`，每筆保存 `chunk_index`／`chunk_count`、完整 structured data，以及該 chunk 的 retrieval content。Table 依 title、summary、cell、notes，Figure 依 visual description、location、text block 等邏輯單元分組；單一單元超限時才在欄位內切分，並重複 cell ID／text-block index。
 
-Figure extractor 輸出繁中 visual_description 與原文 text_blocks；每個 text block 保存自由文字 location。Figure 不另呼叫 summary model。
+有效上限為 `min(LOCAL_RAG_CHUNK_SIZE_TOKENS, model max_seq_length - LOCAL_RAG_EMBEDDING_RESERVED_TOKENS)`；重疊預算讀取 `LOCAL_RAG_CHUNK_OVERLAP_TOKENS`，優先重複完整邏輯單元。若 overlap 不小於有效上限，build 明確失敗。所有 chunks 都必須完整保留原始內容且不超過有效上限，不截斷 cell、notes 或 text blocks。
+
+Figure extractor 輸出繁中 visual_description 與原文 text_blocks；每個 text block 保存自由文字 location。Figure 不另呼叫 summary model。Retrieval 可同時使用同圖不同 chunks，最終 citation 依 crop path 去重。
 
 ## 6. Build filtering and failure boundaries
 
@@ -177,6 +181,6 @@ for review_record in selected_review.records:
 ~~~
 
 - 所有圖片被排除時，只要 Text Records 存在，允許 text-only build 並寫 warning。
-- 完整 table 超過 embedding limit、正式 Records 為空、profile 不符文件或 checksum 不一致時，整次 build 失敗。
+- chunk 設定無效、正式 Records 為空、profile 不符文件或 checksum 不一致時，整次 build 失敗。
 - build 先在 temporary directory 完整寫入與驗證，成功後才 rename 到 builds/NNN。
 - pretty envelope 內列出 editable/read-only fields；人工不直接修改 JSONL。

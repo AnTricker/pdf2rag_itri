@@ -46,20 +46,20 @@ reference DEMO 老人六力衛教 chatbot : http://104.43.109.53:8060/chat
 - 同步測試SDK的實作成果
 
 ### 811
-- 拍攝CMP書本(iphone拍照，VLM可以直接讀.heic?)
-- 同步雙邊README，上傳github，方便未來雙邊同步
-- 修正當前override runtime/index/ 的機制，index{time}/ 儲存每次結果 & 於.env或是serve的commands指定每次RAG的db
-  - 內部加入manual_caption_comments.md，手動審閱caption結果
+- (上傳到雲端硬碟，待處理)拍攝CMP書本(iphone拍照，VLM可以直接讀.heic?)
+- ✅ 同步雙邊README，上傳github，方便未來雙邊同步
+- ✅(包含於本次 caption機制 更新) 修正當前override runtime/index/ 的機制，index{time}/ 儲存每次結果 & 於.env或是serve的commands指定每次RAG的db
+  - ✅(包含於本次 caption機制 更新)內部加入manual_caption_comments.md，手動審閱caption結果
 - ✅caption機制更新，待測試
 
 ### 807
 (prior 前~後)
 - (8/11✅)修好AMD端crop失敗；model 底層去看 AMD要用RODCOM 不能用NV的torch (ultranalytics)，要裝相容版本的
 - (8/11✅)前端刪除PDF按鈕，資料庫原始資料不給使用者看到(回傳的圖 除外)
-- 圖的VLM確認，需要詳細一點 & 能retreival
+- (8/11✅)圖的VLM確認，需要詳細一點 & 能retreival
 - 優化retreival機制，縮短chat legacy(確認LLM冷啟動時間 & serve時每次QA的LLM是熱的還是冷的)
 - 紀錄metadata(跟codex討論本系統合適的log metrics)
-  ` `` text
+  ``` text
     ### 規劃加入紀錄metadata的log
     ingest mode 相關:
         - 基礎規格紀錄 : mode, .env中的相關設置, 各階段的prompt
@@ -71,7 +71,7 @@ reference DEMO 老人六力衛教 chatbot : http://104.43.109.53:8060/chat
         - (總和 & 每次QA中)追蹤數據: 每個ollamaChat module的 GPU用量, I/O token, prefill time , decode time , GPU usage(avg/peak), VRAM usage (avg/peak) 
         - 多階段LLM呼叫，記錄每步驟LLM I/O & time-consuming
 - 部署目前的localhost到本台的ip，供R4的人測試
-- Qdrant 的docker (目前資料較少先不慌，等未來資料多就要)
+- (8/11 學姊協助架好✅)Qdrant 的docker (目前資料較少先不慌，等未來資料多就要)
 
 
 ### 806

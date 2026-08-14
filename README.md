@@ -47,6 +47,25 @@ python main.py serve --output 2026-08-11_15-30-45-123456
 
 text、image、multi mode 分別控制 Stage 1 的文字與圖片支線。Stage 1/2 永遠不更新正式 RAG；只有 build 會在 output 內建立版本化索引。人工只修改 pending/NNN_records.pretty.json 中標示為 editable 的欄位，不直接修改 JSONL。
 
+### 人工審閱流程
+
+1. 執行 `ingest`，記下 CLI 回傳的 `<timestamp>`。產物為 `crops/` 與 `pending/001_records.pretty.json`；若部分 VLM 任務失敗，CLI 會回傳非零狀態，但仍保留這些產物供補跑。
+2. 檢查最新的 `pending/NNN_records.pretty.json`。只修改 `review_instructions.editable_fields` 列出的欄位；來源、crop path、detector 資訊與 schema version 不可修改。
+3. 如有 `null` 的 classifier／extraction／summary 欄位，執行 `review`。它只補缺少欄位，保留人工內容；有變更時產生下一版 `pending/(NNN+1)_records.pretty.json`，可重複執行。
+4. 可選擇產生方便逐圖檢查的 Markdown：
+
+   ~~~powershell
+   python scripts\generate_manual_caption_review.py --output <timestamp> --review NNN
+   ~~~
+
+   產物為 `runtime/outputs/<timestamp>/manual_caption_review_NNN.md`，內含 crop 引用與目前結構化 caption；它只供閱讀，人工修改仍以 pretty JSON 為準。
+
+5. 確認指定 revision 後執行 `build --output <timestamp> --review NNN`。產生 `builds/NNN/`；`unusable` 或 caption 不完整的圖片不會進入正式 `records.jsonl`。
+
+   可用圖片會依結構化 cell／text block 切成多個 schema 2.1 embedding Records；每筆保留完整 table／figure 結構並共享 crop。有效 token 上限取 `.env` 的 chunk size 與 embedding model 上限較小者，overlap 亦讀取 `.env`。`build_report.json` 分別記錄原始圖片數與 image chunk 數。
+
+6. 執行 `serve --output <timestamp>`，載入該 output 編號最大的有效 build。新 build 完成後需重啟 serve。
+
 ~~~text
 runtime/outputs/<timestamp>/
 ├─ crops/
@@ -60,6 +79,8 @@ runtime/outputs/<timestamp>/
 ~~~
 
 詳細流程、schema、判斷樹與偽碼請見 docs/REVIEWABLE_PIPELINE.md。
+同一圖片的多個 chunks 可共同參與 retrieval；回答 citations 依 crop path 去重，只顯示一次圖片。
+
 Chat 會先用 `corpus_profile.json` 做多題拆分與 `document_question`、`out_of_scope`、`security_request` 語意 routing；後端驗證每個原始問題都忠實來自最新輸入，失敗只重試一次。一般問題使用 `focused` retrieval；整份文件概述使用語意 hits 加跨頁／章節代表 Records 的 `overview` retrieval。圖片題至少需要一筆合格 Image Record，圖文問題使用 `hybrid`。Answer JSON 無效或引用未知 Record 時只重試一次；仍未受文件證據支持則由後端直接回覆固定文字。
 
 `runtime/logs/chat_sessions/<YYYY-MM-DD_HH-mm-ss-ffffff>.jsonl` 以結構化 `input`／`output` 記錄 preprocessor、LLM、query embedding、retrieval、evidence gate、answer、rendering、history 與 final response；包含 backend/model、attempt、timing、retrieval rank、頁碼、score 與 content preview。固定 prompt/system instructions、secret 與 embedding vector 不落盤。按「結束對話」後會另產生解析 raw model JSON 並移除所有機器識別欄位的同名 `.pretty.json`，清除 server history並輪替新 session ID。

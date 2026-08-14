@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import sys
 from typing import Optional
 
 from local_rag.adapters import (
@@ -13,7 +14,7 @@ from local_rag.adapters import (
     SentenceTransformerEmbeddingBackend,
     UltralyticsImagePipeline,
 )
-from local_rag.application import PdfRagApplication
+from local_rag.application import ImageReviewIncompleteError, PdfRagApplication
 from local_rag.config import AppConfig
 from local_rag.doctor import run_doctor
 from local_rag.web import create_app
@@ -42,6 +43,24 @@ def image_review_backend(config: AppConfig) -> OllamaImageReviewBackend:
         table_summary_prompt=read_prompt("table_summary_v1.txt"),
         figure_extractor_prompt=read_prompt("figure_extractor_v1.txt"),
     )
+
+
+def report_image_review_failure(error: ImageReviewIncompleteError) -> None:
+    for failure in error.failures:
+        detail = " ".join(str(failure.error).split())
+        print(
+            f"[VLM ERROR] {failure.artifact_path} | {failure.stage} | "
+            f"{type(failure.error).__name__}: {detail}",
+            file=sys.stderr,
+        )
+    print(
+        f"[VLM SUMMARY] operation={error.operation} "
+        f"complete={error.image_complete} failed={len(error.failures)} "
+        f"pending={error.image_pending} total={error.image_total}",
+        file=sys.stderr,
+    )
+    print(f"[VLM OUTPUT] {error.output_root}", file=sys.stderr)
+    print(f"[VLM REVIEW] {error.review_path}", file=sys.stderr)
 
 
 def pipeline_application(
@@ -116,7 +135,11 @@ def main(argv: Optional[list[str]] = None) -> int:
             include_image_review=mode in {"image", "multi"},
             include_profile=False,
         )
-        output_root = app.ingest(source, mode=mode)
+        try:
+            output_root = app.ingest(source, mode=mode)
+        except ImageReviewIncompleteError as error:
+            report_image_review_failure(error)
+            return 1
         print(output_root.name)
         return 0
 
@@ -127,7 +150,11 @@ def main(argv: Optional[list[str]] = None) -> int:
             include_image_review=True,
             include_profile=False,
         )
-        review_path = app.review(args.output)
+        try:
+            review_path = app.review(args.output)
+        except ImageReviewIncompleteError as error:
+            report_image_review_failure(error)
+            return 1
         print(review_path)
         return 0
 

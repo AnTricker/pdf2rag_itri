@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 import hashlib
 import json
@@ -40,6 +41,36 @@ from .snapshot import BuildWriter
 
 OUTPUT_ID_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}-\d{6}$")
 REVIEW_FILE_PATTERN = re.compile(r"^(\d+)_records\.pretty\.json$")
+
+
+@dataclass(frozen=True)
+class ImageTaskFailure:
+    artifact_path: str
+    stage: str
+    error: Exception
+
+
+class ImageReviewIncompleteError(RuntimeError):
+    def __init__(
+        self,
+        *,
+        operation: str,
+        output_root: Path,
+        review_path: Path,
+        failures: list[ImageTaskFailure],
+        image_total: int,
+        image_complete: int,
+    ) -> None:
+        self.operation = operation
+        self.output_root = output_root
+        self.review_path = review_path
+        self.failures = tuple(failures)
+        self.image_total = image_total
+        self.image_complete = image_complete
+        self.image_pending = image_total - image_complete
+        super().__init__(
+            f"{operation} retained output with {len(failures)} VLM failure(s)"
+        )
 
 
 class TextExtractor(Protocol):
@@ -115,6 +146,7 @@ class PdfRagApplication:
         pending_root.mkdir()
         document_hash = self._sha256(source)
         records: list[ReviewTextRecord | ReviewImageRecord] = []
+        failures: list[ImageTaskFailure] = []
         try:
             if selected_mode in {"text", "multi"}:
                 for page in self.text_extractor.extract(source):
@@ -148,13 +180,10 @@ class PdfRagApplication:
                         ),
                         detector_label=candidate.detector_label,
                         detector_confidence=candidate.confidence,
-                        model_name=(
-                            self.image_review_backend.model_name
-                            if self.image_review_backend is not None
-                            else ""
-                        ),
                     )
-                    self._complete_image(record, output_root)
+                    failure = self._complete_image(record, output_root)
+                    if failure is not None:
+                        failures.append(failure)
                     records.append(record)
 
             if not records:
@@ -167,7 +196,16 @@ class PdfRagApplication:
             )
             review_path = pending_root / "001_records.pretty.json"
             self._write_review(review_path, envelope)
+            self._raise_if_image_incomplete(
+                operation="ingest",
+                output_root=output_root,
+                review_path=review_path,
+                records=records,
+                failures=failures,
+            )
             return output_root
+        except ImageReviewIncompleteError:
+            raise
         except Exception:
             shutil.rmtree(output_root, ignore_errors=True)
             raise
@@ -179,18 +217,29 @@ class PdfRagApplication:
             latest_path.read_text(encoding="utf-8")
         )
         before = envelope.model_dump_json()
+        failures: list[ImageTaskFailure] = []
         for record in envelope.records:
             if isinstance(record, ReviewImageRecord):
-                self._complete_image(record, output_root)
+                failure = self._complete_image(record, output_root)
+                if failure is not None:
+                    failures.append(failure)
         if envelope.model_dump_json() == before:
-            return latest_path
-        next_path = (
-            output_root
-            / "pending"
-            / f"{latest_version + 1:03d}_records.pretty.json"
+            review_path = latest_path
+        else:
+            review_path = (
+                output_root
+                / "pending"
+                / f"{latest_version + 1:03d}_records.pretty.json"
+            )
+            self._write_review(review_path, envelope)
+        self._raise_if_image_incomplete(
+            operation="review",
+            output_root=output_root,
+            review_path=review_path,
+            records=envelope.records,
+            failures=failures,
         )
-        self._write_review(next_path, envelope)
-        return next_path
+        return review_path
 
     def build(self, output_id: str, review_version: int) -> Path:
         output_root = self.resolve_output(output_id)
@@ -203,16 +252,19 @@ class PdfRagApplication:
             review_path.read_text(encoding="utf-8")
         )
 
+        self._effective_chunk_settings()
         records: list[KnowledgeRecord] = []
+        source_image_count = 0
         excluded_unusable = 0
         excluded_incomplete = 0
         for review_record in envelope.records:
             if isinstance(review_record, ReviewTextRecord):
                 records.append(self._knowledge_text_record(review_record))
                 continue
-            converted = self._knowledge_image_record(review_record)
-            if converted is not None:
-                records.append(converted)
+            converted = self._knowledge_image_records(review_record)
+            if converted:
+                source_image_count += 1
+                records.extend(converted)
             elif review_record.content_type == "unusable":
                 excluded_unusable += 1
             else:
@@ -232,7 +284,7 @@ class PdfRagApplication:
             if isinstance(review_record, ReviewImageRecord):
                 prompt_versions.update(review_record.prompt_versions)
         manifest = SnapshotManifest(
-            schema_version="2.0",
+            schema_version="2.1",
             document_sha256=envelope.document_sha256,
             record_count=len(records),
             vector_count=len(vectors),
@@ -250,6 +302,8 @@ class PdfRagApplication:
             document_id=envelope.document_sha256,
             text_record_count=sum(record.modality == "text" for record in records),
             image_record_count=sum(record.modality == "image" for record in records),
+            source_image_count=source_image_count,
+            image_chunk_count=sum(record.modality == "image" for record in records),
             excluded_unusable_count=excluded_unusable,
             excluded_incomplete_count=excluded_incomplete,
             embedded_count=len(records),
@@ -280,17 +334,17 @@ class PdfRagApplication:
 
     def _complete_image(
         self, record: ReviewImageRecord, output_root: Path
-    ) -> None:
+    ) -> Optional[ImageTaskFailure]:
         if self.image_review_backend is None:
-            return
+            return None
         crop_path = self._resolve_crop(output_root, record.source.artifact_path)
         if record.content_type is None:
             try:
                 classification = self.image_review_backend.classify(
                     crop_path, record.detector_label
                 )
-            except Exception:
-                return
+            except Exception as error:
+                return self._image_failure(record, "classifier", error)
             record.content_type = classification.content_type
             record.classification_reason = classification.reason
             record.model_name = self.image_review_backend.model_name
@@ -299,14 +353,14 @@ class PdfRagApplication:
             )
 
         if record.content_type == "unusable":
-            return
+            return None
         if record.content_type == "table":
             if record.table_extraction is None:
                 try:
                     draft = self.image_review_backend.extract_table(crop_path)
                     record.table_extraction = self._normalize_table(draft)
-                except Exception:
-                    return
+                except Exception as error:
+                    return self._image_failure(record, "table extractor", error)
             if record.table_summary is None:
                 try:
                     summary = self.image_review_backend.summarize_table(
@@ -314,16 +368,65 @@ class PdfRagApplication:
                     )
                     self._validate_summary(record.table_extraction, summary)
                     record.table_summary = summary
-                except Exception:
-                    return
-            return
+                except Exception as error:
+                    return self._image_failure(record, "table summary", error)
+            return None
         if record.content_type == "figure" and record.figure_extraction is None:
             try:
                 record.figure_extraction = self.image_review_backend.extract_figure(
                     crop_path
                 )
-            except Exception:
-                return
+            except Exception as error:
+                return self._image_failure(record, "figure extractor", error)
+        return None
+
+    @staticmethod
+    def _image_failure(
+        record: ReviewImageRecord, stage: str, error: Exception
+    ) -> ImageTaskFailure:
+        return ImageTaskFailure(
+            artifact_path=record.source.artifact_path or "",
+            stage=stage,
+            error=error,
+        )
+
+    @staticmethod
+    def _image_is_complete(record: ReviewImageRecord) -> bool:
+        if record.content_type == "unusable":
+            return True
+        if record.content_type == "table":
+            return (
+                record.table_extraction is not None
+                and record.table_summary is not None
+            )
+        if record.content_type == "figure":
+            return record.figure_extraction is not None
+        return False
+
+    def _raise_if_image_incomplete(
+        self,
+        *,
+        operation: str,
+        output_root: Path,
+        review_path: Path,
+        records: list[ReviewTextRecord | ReviewImageRecord],
+        failures: list[ImageTaskFailure],
+    ) -> None:
+        if not failures:
+            return
+        image_records = [
+            record for record in records if isinstance(record, ReviewImageRecord)
+        ]
+        raise ImageReviewIncompleteError(
+            operation=operation,
+            output_root=output_root,
+            review_path=review_path,
+            failures=failures,
+            image_total=len(image_records),
+            image_complete=sum(
+                self._image_is_complete(record) for record in image_records
+            ),
+        )
 
     @staticmethod
     def _normalize_table(draft: TableExtractionDraft) -> TableExtraction:
@@ -372,15 +475,17 @@ class PdfRagApplication:
             ),
         )
 
-    def _knowledge_image_record(
+    def _knowledge_image_records(
         self, review_record: ReviewImageRecord
-    ) -> Optional[KnowledgeRecord]:
+    ) -> list[KnowledgeRecord]:
+        table: Optional[TableData]
+        figure: Optional[FigureExtraction]
         if review_record.content_type == "table":
             if (
                 review_record.table_extraction is None
                 or review_record.table_summary is None
             ):
-                return None
+                return []
             self._validate_summary(
                 review_record.table_extraction, review_record.table_summary
             )
@@ -388,85 +493,197 @@ class PdfRagApplication:
                 **review_record.table_extraction.model_dump(),
                 summary=review_record.table_summary,
             )
-            content = self._serialize_table(table)
-            self._ensure_image_content_fits(content)
             figure = None
+            contents = self._chunk_image_units(self._table_units(table))
         elif review_record.content_type == "figure":
             if review_record.figure_extraction is None:
-                return None
-            content = self._serialize_figure(review_record.figure_extraction)
-            self._ensure_image_content_fits(content)
+                return []
             table = None
             figure = review_record.figure_extraction
+            contents = self._chunk_image_units(self._figure_units(figure))
         else:
-            return None
+            return []
+        if not contents:
+            raise ValueError("complete image record did not yield embedding chunks")
 
         source = review_record.source
-        identity = (
-            f"{source.document_sha256}:{source.page_number}:image:"
-            f"{source.artifact_path}:{content}"
-        )
-        return KnowledgeRecord(
-            record_id=hashlib.sha256(identity.encode("utf-8")).hexdigest(),
-            document_id=source.document_sha256,
-            modality="image",
-            content=content,
-            language=self._language(content),
-            source=self._source_metadata(source),
-            processing=self._processing_metadata("reviewed-image-v2", content),
-            image=ImageMetadata(
-                content_type=review_record.content_type,
-                caption_model=review_record.model_name,
-                prompt_versions=review_record.prompt_versions,
-            ),
-            table=table,
-            figure=figure,
-        )
-
-    def _ensure_image_content_fits(self, content: str) -> None:
-        limit = min(
-            self.config.chunk_max_tokens,
-            int(self.embedding_backend.max_input_tokens),
-        )
-        if self.embedding_backend.count(content) > limit:
-            raise ValueError(
-                "complete image record exceeds embedding token limit; "
-                "content was not truncated"
+        image_group_id = hashlib.sha256(
+            (
+                f"{source.document_sha256}:{source.page_number}:image:"
+                f"{source.artifact_path}"
+            ).encode("utf-8")
+        ).hexdigest()
+        chunk_count = len(contents)
+        records: list[KnowledgeRecord] = []
+        for chunk_index, content in enumerate(contents, start=1):
+            record_id = hashlib.sha256(
+                f"{image_group_id}:{chunk_index}:{content}".encode("utf-8")
+            ).hexdigest()
+            records.append(
+                KnowledgeRecord(
+                    schema_version="2.1",
+                    record_id=record_id,
+                    document_id=source.document_sha256,
+                    modality="image",
+                    content=content,
+                    language=self._language(content),
+                    source=self._source_metadata(source),
+                    processing=self._processing_metadata(
+                        "reviewed-image-v2.1", content
+                    ),
+                    image=ImageMetadata(
+                        content_type=review_record.content_type,
+                        caption_model=review_record.model_name,
+                        prompt_versions=review_record.prompt_versions,
+                        image_group_id=image_group_id,
+                        chunk_index=chunk_index,
+                        chunk_count=chunk_count,
+                    ),
+                    table=table,
+                    figure=figure,
+                )
             )
+        return records
 
     @staticmethod
-    def _serialize_table(table: TableData) -> str:
-        lines = [
-            f"表格標題：{table.title or '[EMPTY]'}",
-            f"摘要：{table.summary.text}",
-            "",
-            "儲存格：",
+    def _table_units(table: TableData) -> list[tuple[str, str]]:
+        units = [
+            ("表格標題：", table.title or "[EMPTY]"),
+            ("摘要：", table.summary.text),
         ]
         for cell in sorted(
             table.cells, key=lambda item: (item.row_index, item.column_index)
         ):
-            text = cell.text if cell.text else "[EMPTY]"
-            lines.append(
-                f"[{cell.id}; {cell.cell_type}; row={cell.row_index}; "
-                f"column={cell.column_index}; row_span={cell.row_span}; "
-                f"column_span={cell.column_span}] {text}"
+            units.append(
+                (
+                    f"[{cell.id}; {cell.cell_type}; row={cell.row_index}; "
+                    f"column={cell.column_index}; row_span={cell.row_span}; "
+                    f"column_span={cell.column_span}] ",
+                    cell.text if cell.text else "[EMPTY]",
+                )
             )
-        lines.append("")
-        lines.append(
-            "註解：" + ("；".join(table.notes) if table.notes else "無")
+        if table.notes:
+            units.extend(
+                (f"註解 {index}：", note)
+                for index, note in enumerate(table.notes, start=1)
+            )
+        else:
+            units.append(("註解：", "無"))
+        return units
+
+    @staticmethod
+    def _figure_units(figure: FigureExtraction) -> list[tuple[str, str]]:
+        units = [("圖片描述：", figure.visual_description)]
+        if not figure.text_blocks:
+            units.append(("可見文字：", "無"))
+            return units
+        for index, block in enumerate(figure.text_blocks, start=1):
+            units.append((f"[text_block={index}; location] ", block.location))
+            units.append((f"[text_block={index}; text] ", block.text))
+        return units
+
+    def _chunk_image_units(self, units: list[tuple[str, str]]) -> list[str]:
+        limit, overlap = self._effective_chunk_settings()
+        atomic_units: list[str] = []
+        for label, body in units:
+            complete = f"{label}{body}"
+            if self.embedding_backend.count(complete) <= limit:
+                atomic_units.append(complete)
+            else:
+                atomic_units.extend(
+                    self._split_labeled_unit(label, body, limit, overlap)
+                )
+
+        chunks: list[str] = []
+        current: list[str] = []
+        for unit in atomic_units:
+            candidate = "\n".join([*current, unit])
+            if self.embedding_backend.count(candidate) <= limit:
+                current.append(unit)
+                continue
+            if not current:
+                raise ValueError("image unit exceeds effective embedding token limit")
+            chunks.append("\n".join(current))
+            carry: list[str] = []
+            for previous in reversed(current):
+                overlap_candidate = "\n".join([previous, *carry])
+                if self.embedding_backend.count(overlap_candidate) > overlap:
+                    break
+                carry.insert(0, previous)
+            while carry and self.embedding_backend.count(
+                "\n".join([*carry, unit])
+            ) > limit:
+                carry.pop(0)
+            current = [*carry, unit]
+        if current:
+            chunks.append("\n".join(current))
+        if any(self.embedding_backend.count(chunk) > limit for chunk in chunks):
+            raise ValueError("image chunk exceeds effective embedding token limit")
+        return chunks
+
+    def _split_labeled_unit(
+        self, label: str, body: str, limit: int, overlap: int
+    ) -> list[str]:
+        if self.embedding_backend.count(label) >= limit:
+            raise ValueError("image unit label exceeds effective embedding token limit")
+        characters = list(body)
+        if not characters:
+            return [label]
+        chunks: list[str] = []
+        start = 0
+        while start < len(characters):
+            end = start
+            best_end = start
+            while end < len(characters):
+                candidate = label + "".join(characters[start : end + 1])
+                if self.embedding_backend.count(candidate) > limit:
+                    break
+                best_end = end + 1
+                end += 1
+            if best_end == start:
+                raise ValueError("image unit cannot fit embedding token limit")
+            chunks.append(label + "".join(characters[start:best_end]))
+            if best_end >= len(characters):
+                break
+            overlap_start = best_end
+            while overlap_start > start:
+                candidate = "".join(characters[overlap_start - 1 : best_end])
+                if self.embedding_backend.count(candidate) > overlap:
+                    break
+                overlap_start -= 1
+            start = (
+                overlap_start
+                if start < overlap_start < best_end
+                else best_end
+            )
+        return chunks
+
+    def _effective_chunk_settings(self) -> tuple[int, int]:
+        limit = min(
+            self.config.chunk_max_tokens,
+            int(self.embedding_backend.max_input_tokens),
         )
-        return "\n".join(lines)
+        overlap = self.config.chunk_overlap_tokens
+        if overlap >= limit:
+            raise ValueError(
+                "chunk overlap must be smaller than the effective embedding "
+                f"token limit ({overlap} >= {limit})"
+            )
+        return limit, overlap
+
+    @staticmethod
+    def _serialize_table(table: TableData) -> str:
+        return "\n".join(
+            label + body
+            for label, body in PdfRagApplication._table_units(table)
+        )
 
     @staticmethod
     def _serialize_figure(figure: FigureExtraction) -> str:
-        lines = [f"圖片描述：{figure.visual_description}"]
-        if figure.text_blocks:
-            lines.append("可見文字：")
-            for block in figure.text_blocks:
-                lines.append(f"[{block.location}] {block.text}")
-        else:
-            lines.append("可見文字：無")
-        return "\n".join(lines)
+        return "\n".join(
+            label + body
+            for label, body in PdfRagApplication._figure_units(figure)
+        )
 
     def _build_corpus_profile(
         self, envelope: ReviewEnvelope, records: list[KnowledgeRecord]
@@ -498,10 +715,7 @@ class PdfRagApplication:
         cleaned = " ".join(text.split())
         if not cleaned:
             return []
-        limit = min(
-            self.config.chunk_max_tokens,
-            int(self.embedding_backend.max_input_tokens),
-        )
+        limit, _overlap = self._effective_chunk_settings()
         if self.embedding_backend.count(cleaned) <= limit:
             return [cleaned]
         units = re.findall(r"\S+", cleaned) if " " in cleaned else list(cleaned)

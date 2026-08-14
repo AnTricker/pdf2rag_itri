@@ -448,22 +448,30 @@ class ChatEngine:
 
     @staticmethod
     def _citations(hits: list[SearchHit]) -> list[dict[str, object]]:
-        return [
-            {
-                "record_id": hit.record.record_id,
-                "modality": hit.record.modality,
-                "document_name": hit.record.source.document_name,
-                "page_start": hit.record.source.page_start,
-                "page_end": hit.record.source.page_end,
-                "crop_url": (
-                    f"/api/crops/{hit.record.record_id}"
-                    if hit.record.source.artifact_path
-                    else None
-                ),
-                "score": hit.score,
-            }
-            for hit in hits
-        ]
+        citations: list[dict[str, object]] = []
+        seen: set[str] = set()
+        for hit in hits:
+            artifact_path = hit.record.source.artifact_path
+            identity = artifact_path or hit.record.record_id
+            if identity in seen:
+                continue
+            seen.add(identity)
+            citations.append(
+                {
+                    "record_id": hit.record.record_id,
+                    "modality": hit.record.modality,
+                    "document_name": hit.record.source.document_name,
+                    "page_start": hit.record.source.page_start,
+                    "page_end": hit.record.source.page_end,
+                    "crop_url": (
+                        f"/api/crops/{hit.record.record_id}"
+                        if artifact_path
+                        else None
+                    ),
+                    "score": hit.score,
+                }
+            )
+        return citations
 
     def _trace(self, session_id: str, ordinal: Optional[int] = None):
         def append(event: str, **data) -> None:

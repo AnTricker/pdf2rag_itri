@@ -153,8 +153,8 @@ class AppConfig:
             raise ValueError("ingest mode must be text, image or multi")
         if self.profile_max_records <= 0:
             raise ValueError("profile_max_records must be positive")
-        if self.web_host not in {"127.0.0.1", "localhost", "::1"}:
-            raise ValueError("MVP web host must be localhost")
+        if self.web_host not in {"127.0.0.1", "localhost", "::1", "0.0.0.0"}:
+            raise ValueError("unsupported web host")
         if self.retrieval_top_k <= 0 or not -1 <= self.retrieval_min_score <= 1:
             raise ValueError("invalid retrieval settings")
         if self.retrieval_context_max_records <= 0:

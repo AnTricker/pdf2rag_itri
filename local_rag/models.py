@@ -33,6 +33,15 @@ class ImageMetadata(BaseModel):
     content_type: Literal["table", "figure"]
     caption_model: str
     prompt_versions: dict[str, str] = Field(default_factory=dict)
+    image_group_id: str = ""
+    chunk_index: int = Field(default=1, ge=1)
+    chunk_count: int = Field(default=1, ge=1)
+
+    @model_validator(mode="after")
+    def validate_chunk_position(self) -> "ImageMetadata":
+        if self.chunk_index > self.chunk_count:
+            raise ValueError("image chunk index exceeds chunk count")
+        return self
 
 
 class ImageClassification(BaseModel):
@@ -130,7 +139,7 @@ class FigureExtraction(BaseModel):
 
 
 class KnowledgeRecord(BaseModel):
-    schema_version: str = "2.0"
+    schema_version: str = "2.1"
     record_id: str
     document_id: str
     modality: Literal["text", "image"]
@@ -310,7 +319,7 @@ class EmbeddingMetadata(BaseModel):
 
 
 class SnapshotManifest(BaseModel):
-    schema_version: str = "1.0"
+    schema_version: str = "2.1"
     snapshot_id: str = ""
     document_sha256: str
     records_sha256: str = ""
@@ -333,6 +342,8 @@ class BuildReport(BaseModel):
     document_id: str
     text_record_count: int = Field(ge=0)
     image_record_count: int = Field(ge=0)
+    source_image_count: int = Field(default=0, ge=0)
+    image_chunk_count: int = Field(default=0, ge=0)
     excluded_unusable_count: int = Field(default=0, ge=0)
     excluded_incomplete_count: int = Field(default=0, ge=0)
     embedded_count: int = Field(ge=0)

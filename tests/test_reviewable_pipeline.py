@@ -1,14 +1,22 @@
 from __future__ import annotations
 
+from contextlib import redirect_stderr
+import io
 import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 from pydantic import ValidationError
 
-from local_rag.application import PdfRagApplication
+import main as cli
+from local_rag.application import (
+    ImageReviewIncompleteError,
+    ImageTaskFailure,
+    PdfRagApplication,
+)
 from local_rag.config import AppConfig
 from local_rag.index import FileVectorIndex
 from local_rag.web import create_app
@@ -73,6 +81,26 @@ class ImagePipeline:
                 confidence=0.8,
                 bbox_normalized=(0.1, 0.2, 0.9, 0.8),
             )
+        ]
+
+
+class TwoImagePipeline(ImagePipeline):
+    def extract(
+        self, pdf_path: Path, artifact_root: Path
+    ) -> list[ImageCandidate]:
+        first = super().extract(pdf_path, artifact_root)[0]
+        second_path = artifact_root / "crops" / "page_0001_crop_0002.jpg"
+        second_path.write_bytes(b"second fixture crop")
+        return [
+            first,
+            ImageCandidate(
+                page_number=1,
+                crop_path=second_path,
+                artifact_name=second_path.name,
+                detector_label="dsfig",
+                confidence=0.7,
+                bbox_normalized=(0.2, 0.3, 0.8, 0.7),
+            ),
         ]
 
 
@@ -159,6 +187,30 @@ class FigureReviewBackend(ReviewBackend):
             content_type="figure",
             reason="測試圖片",
         )
+
+class FailingClassifierBackend(ReviewBackend):
+    def classify(
+        self, _crop_path: Path, _detector_label: str
+    ) -> ImageClassification:
+        self.classify_calls += 1
+        raise ConnectionError("Ollama unavailable")
+
+
+class SecondClassifierFailsBackend(ReviewBackend):
+    def classify(
+        self, crop_path: Path, detector_label: str
+    ) -> ImageClassification:
+        if self.classify_calls == 1:
+            self.classify_calls += 1
+            raise ConnectionError("Ollama interrupted")
+        return super().classify(crop_path, detector_label)
+
+
+class FailingSummaryBackend(ReviewBackend):
+    def summarize_table(self, _extraction: TableExtraction) -> TableSummary:
+        self.summary_calls += 1
+        raise ValueError("invalid summary schema")
+
 
 class ProfileBackend:
     def build(
@@ -322,6 +374,135 @@ class ReviewablePipelineTests(unittest.TestCase):
         self.assertEqual(crop.status_code, 200)
         self.assertEqual(crop.data, b"fixture crop")
         crop.close()
+    def test_classifier_failure_preserves_output_and_reports_incomplete(self) -> None:
+        app = PdfRagApplication(
+            config=self.config,
+            text_extractor=TextExtractor(),
+            embedding_backend=EmbeddingBackend(),
+            image_pipeline=ImagePipeline(),
+            image_review_backend=FailingClassifierBackend(),
+            profile_backend=ProfileBackend(),
+        )
+
+        with self.assertRaises(ImageReviewIncompleteError) as caught:
+            app.ingest(self.pdf, mode="multi")
+
+        error = caught.exception
+        self.assertEqual(error.operation, "ingest")
+        self.assertEqual(error.image_complete, 0)
+        self.assertEqual(error.image_pending, 1)
+        self.assertEqual(error.failures[0].stage, "classifier")
+        self.assertTrue(error.output_root.is_dir())
+        payload = json.loads(error.review_path.read_text(encoding="utf-8"))
+        image = next(
+            item for item in payload["records"] if item["modality"] == "image"
+        )
+        self.assertIsNone(image["content_type"])
+        self.assertEqual(image["model_name"], "")
+
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            cli.report_image_review_failure(error)
+        report = stderr.getvalue()
+        self.assertIn("[VLM ERROR]", report)
+        self.assertIn("Ollama unavailable", report)
+        self.assertIn("complete=0 failed=1 pending=1 total=1", report)
+
+    def test_partial_classifier_failure_preserves_successful_image(self) -> None:
+        backend = SecondClassifierFailsBackend()
+        app = PdfRagApplication(
+            config=self.config,
+            text_extractor=TextExtractor(),
+            embedding_backend=EmbeddingBackend(),
+            image_pipeline=TwoImagePipeline(),
+            image_review_backend=backend,
+            profile_backend=ProfileBackend(),
+        )
+
+        with self.assertRaises(ImageReviewIncompleteError) as caught:
+            app.ingest(self.pdf, mode="image")
+
+        error = caught.exception
+        self.assertEqual(error.image_complete, 1)
+        self.assertEqual(error.image_pending, 1)
+        payload = json.loads(error.review_path.read_text(encoding="utf-8"))
+        images = [
+            item for item in payload["records"] if item["modality"] == "image"
+        ]
+        self.assertEqual(images[0]["content_type"], "table")
+        self.assertIsNotNone(images[0]["table_summary"])
+        self.assertIsNone(images[1]["content_type"])
+
+    def test_summary_failure_keeps_completed_fields_for_review_retry(self) -> None:
+        backend = FailingSummaryBackend()
+        app = PdfRagApplication(
+            config=self.config,
+            text_extractor=TextExtractor(),
+            embedding_backend=EmbeddingBackend(),
+            image_pipeline=ImagePipeline(),
+            image_review_backend=backend,
+            profile_backend=ProfileBackend(),
+        )
+
+        with self.assertRaises(ImageReviewIncompleteError) as caught:
+            app.ingest(self.pdf, mode="image")
+
+        error = caught.exception
+        payload = json.loads(error.review_path.read_text(encoding="utf-8"))
+        image = next(
+            item for item in payload["records"] if item["modality"] == "image"
+        )
+        self.assertEqual(error.failures[0].stage, "table summary")
+        self.assertEqual(image["content_type"], "table")
+        self.assertIsNotNone(image["table_extraction"])
+        self.assertIsNone(image["table_summary"])
+        self.assertEqual(image["model_name"], "fixture-model")
+
+        with self.assertRaises(ImageReviewIncompleteError) as review_caught:
+            app.review(error.output_root.name)
+        self.assertEqual(review_caught.exception.operation, "review")
+        self.assertEqual(review_caught.exception.review_path.name, "001_records.pretty.json")
+
+        app.image_review_backend = ReviewBackend()
+        review_two = app.review(error.output_root.name)
+        self.assertEqual(review_two.name, "002_records.pretty.json")
+
+    def test_cli_returns_nonzero_for_retained_vlm_failure(self) -> None:
+        output = self.root / "outputs" / "2026-08-12_00-00-00-000001"
+        review = output / "pending" / "001_records.pretty.json"
+        failure = ImageReviewIncompleteError(
+            operation="ingest",
+            output_root=output,
+            review_path=review,
+            failures=[
+                ImageTaskFailure(
+                    artifact_path="crops/page_0001_crop_0001.jpg",
+                    stage="classifier",
+                    error=ConnectionError("Ollama unavailable"),
+                )
+            ],
+            image_total=1,
+            image_complete=0,
+        )
+
+        class RaisingApplication:
+            def ingest(self, _source: Path, *, mode: str) -> Path:
+                raise failure
+
+        stderr = io.StringIO()
+        with (
+            patch.object(cli.AppConfig, "from_env", return_value=self.config),
+            patch.object(cli, "pipeline_application", return_value=RaisingApplication()),
+            redirect_stderr(stderr),
+        ):
+            exit_code = cli.main(
+                ["ingest", "--input", str(self.pdf), "--mode", "image"]
+            )
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("[VLM SUMMARY]", stderr.getvalue())
+        self.assertIn(str(output), stderr.getvalue())
+
     def test_table_grid_rejects_missing_cells(self) -> None:
         with self.assertRaises(ValidationError):
             TableExtraction(
