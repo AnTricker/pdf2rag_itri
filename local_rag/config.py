@@ -53,9 +53,18 @@ class AppConfig:
     llm_backend: str = "ollama"
     llm_model: str = ""
     llm_timeout_seconds: int = 120
+    llm_context_tokens: int = 32768
+    answer_input_budget_tokens: int = 24576
     web_host: str = "127.0.0.1"
     web_port: int = 8000
+    web_threads: int = 8
+    session_secret: str = ''
     session_ttl_seconds: int = 3600
+    job_retention_seconds: int = 3600
+    upload_max_files: int = 3
+    upload_max_file_bytes: int = 5 * 1024 * 1024
+    upload_max_total_bytes: int = 10 * 1024 * 1024
+    upload_max_pixels: int = 20_000_000
     history_max_turns: int = 12
     history_max_tokens: int = 4096
     preprocessor_prompt_version: str = "question-preprocessor-v1"
@@ -78,6 +87,15 @@ class AppConfig:
         poppler_value = get("LOCAL_RAG_POPPLER_PATH", "").strip()
 
         config = cls(
+            llm_context_tokens=int(get('LOCAL_RAG_LLM_CONTEXT_TOKENS', '32768')),
+            answer_input_budget_tokens=int(get('LOCAL_RAG_ANSWER_INPUT_BUDGET_TOKENS', '24576')),
+            web_threads=int(get('LOCAL_RAG_WEB_THREADS', '8')),
+            session_secret=get('LOCAL_RAG_SESSION_SECRET', ''),
+            job_retention_seconds=int(get('LOCAL_RAG_JOB_RETENTION_SECONDS', '3600')),
+            upload_max_files=int(get('LOCAL_RAG_UPLOAD_MAX_FILES', '3')),
+            upload_max_file_bytes=int(get('LOCAL_RAG_UPLOAD_MAX_FILE_BYTES', str(5 * 1024 * 1024))),
+            upload_max_total_bytes=int(get('LOCAL_RAG_UPLOAD_MAX_TOTAL_BYTES', str(10 * 1024 * 1024))),
+            upload_max_pixels=int(get('LOCAL_RAG_UPLOAD_MAX_PIXELS', '20000000')),
             base_dir=base,
             index_root=_relative_path(base, get("LOCAL_RAG_INDEX_ROOT", "runtime/outputs")),
             ingest_mode=get("LOCAL_RAG_INGEST_MODE", "multi").strip().lower(),
@@ -143,6 +161,14 @@ class AppConfig:
         return cls(base_dir=index_root.parent.resolve(), index_root=index_root.resolve())
 
     def validate(self) -> None:
+        if self.llm_context_tokens <= 0:
+            raise ValueError('llm_context_tokens must be positive')
+        if not 0 < self.answer_input_budget_tokens < self.llm_context_tokens:
+            raise ValueError('answer input budget must be smaller than LLM context')
+        if self.web_threads <= 0 or self.job_retention_seconds <= 0:
+            raise ValueError('web threads and job retention must be positive')
+        if (self.upload_max_files <= 0 or self.upload_max_file_bytes <= 0 or self.upload_max_total_bytes < self.upload_max_file_bytes or self.upload_max_pixels <= 0):
+            raise ValueError('invalid upload limits')
         if self.chunk_max_tokens <= 0:
             raise ValueError("chunk size must be positive")
         if not 0 <= self.chunk_overlap_tokens < self.chunk_max_tokens:

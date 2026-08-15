@@ -281,6 +281,21 @@ class RetrievalQueryPlan(BaseModel):
     queries: list[str] = Field(min_length=1, max_length=3)
 
 
+class QueryPlanItem(BaseModel):
+    model_config = ConfigDict(extra='ignore', str_strip_whitespace=True)
+
+    question: str = Field(min_length=1)
+    route: Literal['document_question', 'out_of_scope', 'security_request']
+    queries: list[str] = Field(default_factory=list, max_length=3)
+    needs_visual_context: bool = False
+
+
+class QueryPlan(BaseModel):
+    model_config = ConfigDict(extra='ignore')
+
+    items: list[QueryPlanItem] = Field(min_length=1)
+
+
 class EvidenceNote(BaseModel):
     model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
 
@@ -304,6 +319,30 @@ class FinalAnswer(BaseModel):
     model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
 
     blocks: list[FinalAnswerBlock] = Field(min_length=1)
+
+
+class GroundedAnswerItem(BaseModel):
+    model_config = ConfigDict(extra='ignore', str_strip_whitespace=True)
+
+    item_index: int = Field(ge=0)
+    blocks: list[FinalAnswerBlock] = Field(min_length=1)
+    attachment_names: list[str] = Field(default_factory=list)
+
+
+class GroundedAnswerBatch(BaseModel):
+    model_config = ConfigDict(extra='ignore')
+
+    items: list[GroundedAnswerItem] = Field(min_length=1)
+
+
+class AttachmentMetadata(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+
+    name: str = Field(min_length=1)
+    media_type: Literal['image/jpeg', 'image/png', 'image/webp']
+    size_bytes: int = Field(gt=0)
+    width: int = Field(gt=0)
+    height: int = Field(gt=0)
 
 
 class QAHistoryPair(BaseModel):

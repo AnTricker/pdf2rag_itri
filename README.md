@@ -81,11 +81,15 @@ runtime/outputs/<timestamp>/
 詳細流程、schema、判斷樹與偽碼請見 docs/REVIEWABLE_PIPELINE.md。
 同一圖片的多個 chunks 可共同參與 retrieval；回答 citations 依 crop path 去重，只顯示一次圖片。
 
-Chat 會先用 `corpus_profile.json` 做多題拆分與 `document_question`、`out_of_scope`、`security_request` 語意 routing；後端驗證每個原始問題都忠實來自最新輸入，失敗只重試一次。一般問題使用 `focused` retrieval；整份文件概述使用語意 hits 加跨頁／章節代表 Records 的 `overview` retrieval。圖片題至少需要一筆合格 Image Record，圖文問題使用 `hybrid`。Answer JSON 無效或引用未知 Record 時只重試一次；仍未受文件證據支持則由後端直接回覆固定文字。
+Serve 啟動時會先 warm LLM；warm 失敗時直接退出，成功後才由 Waitress 開放連線。部署前必須設定 `LOCAL_RAG_SESSION_SECRET`，AMD 單 GPU 建議以 `OLLAMA_NUM_PARALLEL=1` 啟動 Ollama。
 
-`runtime/logs/chat_sessions/<YYYY-MM-DD_HH-mm-ss-ffffff>.jsonl` 以結構化 `input`／`output` 記錄 preprocessor、LLM、query embedding、retrieval、evidence gate、answer、rendering、history 與 final response；包含 backend/model、attempt、timing、retrieval rank、頁碼、score 與 content preview。固定 prompt/system instructions、secret 與 embedding vector 不落盤。按「結束對話」後會另產生解析 raw model JSON 並移除所有機器識別欄位的同名 `.pretty.json`，清除 server history並輪替新 session ID。
+Chat 使用一次 Query Planner 完成拆題、routing 與 retrieval queries，再由程式檢索，最後以最少必要的 Answer batches 產生回答。一般單題只需兩次 LLM 呼叫。Planner 失敗不重試；Answer schema 或引用驗證失敗才重試一次，HTTP timeout 不重試。
 
-瀏覽 `http://127.0.0.1:8000`。MVP 不支援 hot reload；建立新 build 後需重啟 serve 才會載入。原始 PDF 不複製到 output，也沒有公開檢視 route。
+前端以 server-signed cookie 隔離 session，透過 job queue 與 SSE 顯示排隊、規劃、檢索、圖片分析及回答階段。每次 QA 可附加最多三張 JPEG/PNG/WebP；附件只用於當次 QA，完成後刪除，不加入知識庫。
+
+`runtime/logs/chat_sessions/<timestamp>.jsonl` 保存 machine events；同名 `.pretty.json` 在每個重要事件後即時 atomic 更新，排除完整 prompt、raw output、hidden thinking 與附件內容。按「結束對話」會取消該 session 工作、整理 log、清除 history 並輪替 cookie。
+
+瀏覽 `http://127.0.0.1:8000`。新 build 完成後需重啟 serve 才會載入。
 
 ---
 ## AMD ROCm / PyTorch Setup Notes

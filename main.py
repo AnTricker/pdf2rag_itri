@@ -17,7 +17,7 @@ from local_rag.adapters import (
 from local_rag.application import ImageReviewIncompleteError, PdfRagApplication
 from local_rag.config import AppConfig
 from local_rag.doctor import run_doctor
-from local_rag.web import create_app
+from local_rag.serve_web import create_app
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -170,14 +170,16 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 0
 
     if args.command == "serve":
+        if not config.session_secret:
+            raise ValueError("LOCAL_RAG_SESSION_SECRET is required for serve")
         embedding = embedding_backend(config)
         chat = OllamaChatBackend(
             config,
-            splitter_prompt=read_prompt("question_splitter_v2.txt"),
+            splitter_prompt=read_prompt("query_planner_v1.txt"),
             admission_prompt=read_prompt("query_admission_v2.txt"),
             query_builder_prompt=read_prompt("retrieval_query_builder_v2.txt"),
             evidence_draft_prompt=read_prompt("evidence_draft_v1.txt"),
-            final_answer_prompt=read_prompt("final_answer_v2.txt"),
+            final_answer_prompt=read_prompt("grounded_answer_v1.txt"),
         )
         resolver = PdfRagApplication(
             config=config,
@@ -186,14 +188,28 @@ def main(argv: Optional[list[str]] = None) -> int:
         )
         output_root = resolver.resolve_output(args.output)
         build_root = resolver.latest_build(output_root)
-        app = create_app(
-            config=config,
-            embedding_backend=embedding,
-            chat_backend=chat,
-            build_root=build_root,
-            output_root=output_root,
-        )
-        app.run(host=config.web_host, port=config.web_port, debug=False)
+        warm_metrics = chat.warm()
+        print(f"[LLM WARM] model={chat.model} metrics={warm_metrics}", file=sys.stderr)
+        app = None
+        try:
+            app = create_app(
+                config=config,
+                embedding_backend=embedding,
+                chat_backend=chat,
+                build_root=build_root,
+                output_root=output_root,
+            )
+            from waitress import serve
+
+            serve(app, host=config.web_host, port=config.web_port,
+                  threads=config.web_threads)
+        finally:
+            if app is not None:
+                app.extensions["chat_job_manager"].shutdown()
+            try:
+                chat.unload()
+            except Exception as error:
+                print(f"[LLM UNLOAD WARNING] {error}", file=sys.stderr)
         return 0
     return 2
 

@@ -29,6 +29,8 @@ from .models import (
     TableSummary,
     QuestionSplit,
     RetrievalQueryPlan,
+    GroundedAnswerBatch,
+    QueryPlan,
 )
 
 
@@ -256,6 +258,7 @@ class OllamaCorpusProfileBackend:
         self.url = config.llm_url
         self.model_name = config.llm_model
         self.timeout = config.llm_timeout_seconds
+        self.context_tokens = config.llm_context_tokens
         self.prompt = prompt
 
     def build(
@@ -314,6 +317,7 @@ class OllamaChatBackend:
         self.url = config.llm_url
         self.model = config.llm_model
         self.timeout = config.llm_timeout_seconds
+        self.context_tokens = config.llm_context_tokens
         self.splitter_prompt = splitter_prompt
         self.admission_prompt = admission_prompt
         self.query_builder_prompt = query_builder_prompt
@@ -321,6 +325,72 @@ class OllamaChatBackend:
         self.final_answer_prompt = final_answer_prompt
         self.preprocessor_max_retries = config.preprocessor_max_retries
         self.answer_max_retries = config.answer_max_retries
+
+    def warm(self) -> dict[str, int]:
+        response = requests.post(
+            f'{self.url}/api/generate',
+            json={
+                'model': self.model,
+                'prompt': '',
+                'stream': False,
+                'keep_alive': -1,
+                'options': {'num_ctx': self.context_tokens},
+            },
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+        return self._metrics(response.json())
+
+    def unload(self) -> None:
+        response = requests.post(
+            f'{self.url}/api/generate',
+            json={'model': self.model, 'prompt': '', 'stream': False, 'keep_alive': 0},
+            timeout=min(self.timeout, 30),
+        )
+        response.raise_for_status()
+
+    @staticmethod
+    def _metrics(payload: dict) -> dict[str, int]:
+        names = (
+            'total_duration', 'load_duration', 'prompt_eval_count',
+            'prompt_eval_duration', 'eval_count', 'eval_duration',
+        )
+        return {name: int(payload.get(name, 0)) for name in names}
+
+    @staticmethod
+    def _normalized_json(raw: str) -> str:
+        cleaned = raw.strip()
+        if cleaned.startswith('```'):
+            cleaned = re.sub(r'^```(?:json)?\s*|\s*```$', '', cleaned, flags=re.IGNORECASE)
+        start = cleaned.find('{')
+        end = cleaned.rfind('}')
+        if start < 0 or end < start:
+            raise ValueError('model output does not contain a JSON object')
+        return cleaned[start:end + 1]
+
+    def _generate_structured(self, prompt, schema_type, *, think, images=None):
+        import base64
+
+        payload = {
+            'model': self.model,
+            'prompt': prompt,
+            'format': schema_type.model_json_schema(),
+            'stream': False,
+            'think': think,
+            'keep_alive': -1,
+            'options': {'num_ctx': self.context_tokens},
+        }
+        if images:
+            payload['images'] = [
+                base64.b64encode(path.read_bytes()).decode('ascii') for path in images
+            ]
+        response = requests.post(
+            f'{self.url}/api/generate', json=payload, timeout=self.timeout
+        )
+        response.raise_for_status()
+        body = response.json()
+        raw = str(body['response']).strip()
+        return schema_type.model_validate_json(self._normalized_json(raw)), self._metrics(body)
 
     def _generate(self, prompt: str, *, schema: Optional[dict] = None) -> str:
         payload = {"model": self.model, "prompt": prompt, "stream": False}
@@ -519,3 +589,72 @@ class OllamaChatBackend:
             },
             trace=trace,
         )
+
+    def plan(self, latest_input, history, corpus_profile, trace=None) -> QueryPlan:
+        prompt = self.splitter_prompt.format(
+            latest_input=latest_input,
+            history=json.dumps(history[-8:], ensure_ascii=False),
+            corpus_profile=json.dumps(corpus_profile.model_dump(), ensure_ascii=False),
+        )
+        if trace is not None:
+            trace('model_call_started', stage='query_planner', attempt=1, backend=self.name, model=self.model)
+        result, metrics = self._generate_structured(prompt, QueryPlan, think=False)
+        self._validate_query_plan(latest_input, result)
+        if trace is not None:
+            trace('model_call_completed', stage='query_planner', attempt=1, backend=self.name, model=self.model, metrics=metrics)
+        return result
+
+    def answer_batch(self, items, image_paths, trace=None) -> GroundedAnswerBatch:
+        base_prompt = self.final_answer_prompt.format(
+            items=json.dumps({
+                'items': items,
+                'image_order': [path.name for path in image_paths],
+            }, ensure_ascii=False)
+        )
+        previous_error = None
+        for attempt in range(2):
+            prompt = base_prompt
+            if previous_error is not None:
+                prompt += '\n\n前次輸出驗證失敗：' + previous_error + '\n請重新輸出完整 JSON。'
+            if trace is not None:
+                trace('model_call_started', stage='grounded_answer', attempt=attempt + 1, backend=self.name, model=self.model)
+            try:
+                result, metrics = self._generate_structured(
+                    prompt, GroundedAnswerBatch, think=False, images=image_paths
+                )
+                self._validate_answer_batch(items, result)
+                if trace is not None:
+                    trace('model_call_completed', stage='grounded_answer', attempt=attempt + 1, backend=self.name, model=self.model, metrics=metrics)
+                return result
+            except (KeyError, ValueError) as error:
+                previous_error = str(error)
+                if trace is not None:
+                    trace('model_output_rejected', stage='grounded_answer', attempt=attempt + 1, validation_error=previous_error)
+        raise ValueError('grounded answer returned invalid structured output: ' + str(previous_error))
+
+    @classmethod
+    def _validate_query_plan(cls, latest_input: str, result: QueryPlan) -> None:
+        expected = cls._split_separator_pattern.sub('', latest_input)
+        actual = ''.join(
+            cls._split_separator_pattern.sub('', item.question)
+            for item in result.items
+        )
+        if not expected or actual != expected:
+            raise ValueError('planner must preserve all input questions in order')
+        if any(item.route == 'document_question' and not item.queries for item in result.items):
+            raise ValueError('document questions require retrieval queries')
+
+    @staticmethod
+    def _validate_answer_batch(request_items, result: GroundedAnswerBatch) -> None:
+        requested = {item['item_index']: item for item in request_items}
+        if {item.item_index for item in result.items} != set(requested):
+            raise ValueError('answer batch item indexes do not match request')
+        for item in result.items:
+            request_item = requested[item.item_index]
+            maximum = len(request_item['sources'])
+            if any(number < 1 or number > maximum
+                   for block in item.blocks for number in block.source_numbers):
+                raise ValueError('answer references an unknown source number')
+            allowed_attachments = set(request_item['attachment_names'])
+            if not set(item.attachment_names) <= allowed_attachments:
+                raise ValueError('answer references an unknown attachment')

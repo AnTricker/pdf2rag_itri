@@ -22,7 +22,7 @@ class SessionJsonlLogger:
     def __init__(self, root: Optional[Path], *, enabled: bool) -> None:
         self.root = root
         self.enabled = enabled and root is not None
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._session_stems: dict[str, str] = {}
 
     def append(self, session_id: str, event: str, **data: Any) -> None:
@@ -43,6 +43,8 @@ class SessionJsonlLogger:
             with path.open("a", encoding="utf-8", newline="\n") as output:
                 output.write(json.dumps(payload, ensure_ascii=False, default=str))
                 output.write("\n")
+
+        self._write_pretty(session_id)
 
     def end(self, session_id: str, reason: str) -> None:
         self.append(session_id, "session_end", reason=reason)
@@ -76,6 +78,8 @@ class SessionJsonlLogger:
         if isinstance(value, dict):
             output = {}
             for key, item in value.items():
+                if key in {'raw_output', 'prompt', 'thinking'}:
+                    continue
                 if (
                     key in cls.machine_only_keys
                     or key.endswith("_sha256")

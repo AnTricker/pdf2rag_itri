@@ -148,3 +148,7 @@ def create_app(
         return jsonify(error_code="internal_error", message="處理失敗，請稍後重試"), 500
 
     return app
+
+
+# Public compatibility import: serve now uses the job/SSE implementation.
+from .serve_web import create_app as create_app
