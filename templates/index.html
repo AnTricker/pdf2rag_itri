@@ -17,6 +17,7 @@
       <div class="actions"><button id="clear" type="button">清除對話</button><button id="end-chat" type="button">結束對話</button></div>
     </header>
     <section id="messages" aria-live="polite" aria-busy="false"></section>
+    <script id="suggested-questions-data" type="application/json">{{ suggested_questions | tojson }}</script>
     <form id="chat-form" data-max-files="{{ upload_max_files }}" data-max-file-bytes="{{ upload_max_file_mb * 1024 * 1024 }}" data-max-total-bytes="{{ upload_max_total_mb * 1024 * 1024 }}">
       <label for="question">請輸入文件相關問題</label>
       <div class="composer">
@@ -29,6 +30,9 @@
         <span class="upload-hint">可選擇或直接貼上圖片。最多 {{ upload_max_files }} 張；單張 {{ upload_max_file_mb }} MB、合計 {{ upload_max_total_mb }} MB。附件僅用於當次 QA，不會加入知識庫。</span>
       </div>
       <div id="attachment-preview" class="attachment-preview"></div>
+      <div class="report-actions">
+        <button id="export-report" type="button" disabled>輸出對話報告</button>
+      </div>
       <p id="status" role="status"><span id="status-text"></span></p>
     </form>
   </main>

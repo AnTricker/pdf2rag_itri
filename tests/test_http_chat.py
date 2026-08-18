@@ -139,6 +139,10 @@ class HttpChatTests(unittest.TestCase):
         self.assertIn(b'event: completed', events.data)
         history = self.client.get('/api/history').get_json()['messages']
         self.assertEqual([item['role'] for item in history], ['user', 'assistant'])
+        answer = history[1]['items'][0]
+        self.assertEqual(answer['feedback'], 0)
+        self.assertEqual(answer['actions'], [])
+        self.assertEqual(len(answer['qa_id']), 32)
         self.assertTrue(list(self.config.session_log_root.glob('*.pretty.json')))
 
     def test_job_is_owned_by_signed_cookie_session(self):
@@ -192,6 +196,52 @@ class HttpChatTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.get_json()['error_code'], 'invalid_attachment')
 
+    def test_suggestion_and_qa_actions_are_stored_in_qa_block(self):
+        suggestion = 'CMP 機台開機前需要確認哪些項目？'
+        selected = self.client.post('/api/chat/suggestions', json={'question': suggestion})
+        self.assertEqual(selected.status_code, 204)
+        response = self.client.post('/api/chat/jobs', data={'question': suggestion})
+        self._wait(response.get_json()['job_id'])
+        item = self.client.get('/api/history').get_json()['messages'][1]['items'][0]
+        self.assertEqual(item['actions'][0]['action'], 'suggestion_selected')
+
+        updated = self.client.post(
+            f'/api/chat/qa/{item["qa_id"]}/actions',
+            json={'action': 'feedback', 'feedback': 1},
+        )
+        self.assertEqual(updated.status_code, 200)
+        self.assertEqual(updated.get_json()['feedback'], 1)
+        copied = self.client.post(
+            f'/api/chat/qa/{item["qa_id"]}/actions',
+            json={'action': 'copy'},
+        )
+        self.assertEqual(copied.status_code, 200)
+        history_item = self.client.get('/api/history').get_json()['messages'][1]['items'][0]
+        self.assertEqual(history_item['feedback'], 1)
+        self.assertEqual([entry['action'] for entry in history_item['actions']],
+                         ['suggestion_selected', 'feedback', 'copy'])
+
+        other = self.app.test_client()
+        denied = other.post(
+            f'/api/chat/qa/{item["qa_id"]}/actions',
+            json={'action': 'feedback', 'feedback': -1},
+        )
+        self.assertEqual(denied.status_code, 404)
+
+    def test_markdown_report_is_downloaded_without_disk_copy(self):
+        empty = self.client.post('/api/history/report')
+        self.assertEqual(empty.status_code, 409)
+        response = self.client.post('/api/chat/jobs', data={'question': '如何重設？'})
+        self._wait(response.get_json()['job_id'])
+        report = self.client.post('/api/history/report')
+        self.assertEqual(report.status_code, 200)
+        self.assertIn('attachment; filename="cmp_chat_', report.headers['Content-Disposition'])
+        text = report.data.decode('utf-8')
+        self.assertIn('report_version: 1', text)
+        self.assertIn('## 對話 1', text)
+        self.assertIn('manual.pdf，第 4 頁', text)
+        self.assertFalse(list(self.config.session_log_root.glob('*.md')))
+
     def test_end_session_cancels_jobs_rotates_cookie_and_finishes_log(self):
         self.client.get('/')
         before = self.client.get_cookie('local_rag_session').value
@@ -200,7 +250,9 @@ class HttpChatTests(unittest.TestCase):
         after = self.client.get_cookie('local_rag_session').value
         self.assertNotEqual(before, after)
         pretty = json.loads(next(self.config.session_log_root.glob('*.pretty.json')).read_text(encoding='utf-8'))
-        self.assertEqual(pretty[-1]['event'], 'session_end')
+        self.assertIn('qa_blocks', pretty)
+        self.assertEqual(pretty['session_actions'][-1]['action'], 'end_chat')
+        self.assertEqual(pretty['diagnostics'][-1]['event'], 'session_end')
 
 
 if __name__ == '__main__':

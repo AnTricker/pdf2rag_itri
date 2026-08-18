@@ -21,6 +21,15 @@ button:disabled { cursor: not-allowed; opacity: .45; box-shadow: none; }
 .message { width: fit-content; max-width: 78%; margin: 12px 0; padding: 13px 15px; border: 1px solid transparent; border-radius: 15px; line-height: 1.58; white-space: pre-wrap; overflow-wrap: anywhere; box-shadow: 0 4px 12px #2438480d; }
 .user { margin-left: auto; color: #0c3850; background: #dff2fc; border-bottom-right-radius: 5px; border-color: #c7e6f6; }
 .assistant { color: #26343e; background: #f2f5f7; border-bottom-left-radius: 5px; border-color: #e1e7eb; }
+.assistant.route-out-of-scope { background: #fff9db; border-color: #efd97b; }
+.assistant.route-security { background: #fff0ee; border-color: #efaaa2; }
+.assistant.route-insufficient { background: #edf6ff; border-color: #a9d3f3; }
+.answer-label { display: inline-block; margin-bottom: 8px; padding: 3px 8px; border-radius: 999px; background: #ffffffa6; color: #4e5d67; font-size: .75rem; font-weight: 800; }
+.answer-content { min-width: 0; }
+.answer-actions { display: flex; gap: 6px; margin-top: 10px; padding-top: 8px; border-top: 1px solid #d6dfe5; }
+.answer-actions button { padding: 5px 9px; color: #536572; background: #ffffffa8; border: 1px solid #d1dce3; box-shadow: none; font-size: .8rem; }
+.answer-actions button:hover:not(:disabled) { color: #075f8c; background: white; }
+.answer-actions button.active { color: white; background: #1677a7; border-color: #1677a7; }
 .message.loading { display: flex; align-items: center; gap: 11px; color: #365365; background: #f5f9fb; }
 .message.error { color: #812d24; background: #fff1ef; border-color: #f3cbc5; }
 .loading-dots { display: inline-flex; gap: 4px; flex: 0 0 auto; }
@@ -52,5 +61,15 @@ textarea:focus { border-color: #2688b8; box-shadow: 0 0 0 3px #2a8cba1c; }
 .attachment-card span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .84rem; }
 .attachment-card button { padding: 5px 8px; color: #85372f; background: #f7e4e1; box-shadow: none; font-size: .78rem; }
 .attachment-card button:hover:not(:disabled) { color: white; background: #9a443a; }
+.welcome-panel { max-width: 680px; margin: 42px auto; padding: 24px; text-align: center; color: #344956; }
+.welcome-panel h2 { margin: 0 0 8px; font-size: 1.25rem; }
+.welcome-panel p { margin: 0 0 18px; color: #667984; }
+.suggested-questions { display: grid; grid-template-columns: repeat(2, 1fr); gap: 9px; }
+.suggested-question { color: #24546d; background: white; border: 1px solid #cbdde7; box-shadow: 0 3px 9px #2438480a; text-align: left; font-weight: 600; }
+.suggested-question:hover:not(:disabled) { color: #064e75; background: #eef8fd; }
+.report-actions { display: flex; justify-content: flex-end; margin-top: 9px; }
+#export-report { padding: 7px 11px; color: #31576b; background: #e9f1f5; box-shadow: none; font-size: .86rem; }
+.ended-panel { max-width: 560px; margin: 18vh auto 0; padding: 36px; text-align: center; background: white; border: 1px solid #d9e2e8; border-radius: 18px; box-shadow: 0 14px 34px #18354d12; }
+.ended-panel h1 { margin-top: 0; }
 form.busy textarea, form.busy .upload-button { opacity: .55; pointer-events: none; }
 @media (max-width: 640px) { header { align-items: flex-start; flex-direction: column; } .message { max-width: 92%; } }

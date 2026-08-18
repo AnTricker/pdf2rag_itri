@@ -77,19 +77,21 @@ runtime/outputs/<timestamp>/
    ├─ manifest.json
    └─ build_report.json
 ~~~
+#### (8/15) update ```--serve```
+- Serve 啟動時會先 warm LLM；warm 失敗時直接退出，成功後才由 Waitress 開放連線。部署前必須設定 `LOCAL_RAG_SESSION_SECRET`，AMD 單 GPU 建議以 `OLLAMA_NUM_PARALLEL=1` 啟動 Ollama。
 
-詳細流程、schema、判斷樹與偽碼請見 docs/REVIEWABLE_PIPELINE.md。
-同一圖片的多個 chunks 可共同參與 retrieval；回答 citations 依 crop path 去重，只顯示一次圖片。
+- Chat 使用一次 Query Planner 完成拆題、routing 與 retrieval queries，再由程式檢索，最後以最少必要的 Answer batches 產生回答。一般單題只需兩次 LLM 呼叫。Planner 失敗不重試；Answer schema 或引用驗證失敗才重試一次，HTTP timeout 不重試。
 
-Serve 啟動時會先 warm LLM；warm 失敗時直接退出，成功後才由 Waitress 開放連線。部署前必須設定 `LOCAL_RAG_SESSION_SECRET`，AMD 單 GPU 建議以 `OLLAMA_NUM_PARALLEL=1` 啟動 Ollama。
+- 前端以 server-signed cookie 隔離 session，透過 job queue 與 SSE 在對話框內顯示排隊、規劃、檢索、圖片分析及回答階段。每次 QA 可選擇或直接貼上最多三張 JPEG/PNG/WebP；附件只用於當次 QA，完成後刪除，不加入知識庫。Enter 可直接送出，Shift+Enter 換行。
 
-Chat 使用一次 Query Planner 完成拆題、routing 與 retrieval queries，再由程式檢索，最後以最少必要的 Answer batches 產生回答。一般單題只需兩次 LLM 呼叫。Planner 失敗不重試；Answer schema 或引用驗證失敗才重試一次，HTTP timeout 不重試。
+#### (8/18) update ```--serve```
+- 空對話會顯示 CMP 操作規範歡迎訊息與 hardcode 提示問題。回答依正常查詢、超出範圍、安全限制及文件資訊不足呈現不同狀態；每個 QA block 可複製、按讚或倒讚。引用單頁顯示「第 n 頁」，跨頁顯示「第 n~m 頁」，引用到 image record 時會在參考資料顯示 crop。
 
-前端以 server-signed cookie 隔離 session，透過 job queue 與 SSE 顯示排隊、規劃、檢索、圖片分析及回答階段。每次 QA 可附加最多三張 JPEG/PNG/WebP；附件只用於當次 QA，完成後刪除，不加入知識庫。
+- 「輸出對話報告」會依目前已完成的 QA 即時下載 Markdown，伺服器不保存 `.md`。報告包含 Session／模型／build metadata、問題、回答、feedback、附件 metadata 與引用，不包含 prompt、hidden thinking 或附件內容。回答進行中或沒有完整 QA 時無法輸出。
 
-`runtime/logs/chat_sessions/<timestamp>.jsonl` 保存 machine events；同名 `.pretty.json` 在每個重要事件後即時 atomic 更新，排除完整 prompt、raw output、hidden thinking 與附件內容。按「結束對話」會取消該 session 工作、整理 log、清除 history 並輪替 cookie。
+- `runtime/logs/chat_sessions/<timestamp>.jsonl` 保存 machine events；同名 `.pretty.json` 在每個重要事件後即時 atomic 更新，並依 `session`、`qa_blocks`、`session_actions`、`diagnostics` 分組。QA block 保存 feedback 與複製／提示問題操作時間，Session actions 保存輸出報告、清除及結束操作；log 排除完整 prompt、raw output、hidden thinking 與附件內容。
 
-瀏覽 `http://127.0.0.1:8000`。新 build 完成後需重啟 serve 才會載入。
+- 按「清除對話」會清空 history、輪替 cookie 並重新顯示歡迎區。按「結束對話」會取消該 Session 工作、清除 history、完成 log、輪替 cookie 並嘗試關閉分頁；若瀏覽器禁止自動關閉，頁面會顯示可安全關閉的提示。
 
 ---
 ## AMD ROCm / PyTorch Setup Notes

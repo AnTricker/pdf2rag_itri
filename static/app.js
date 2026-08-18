@@ -5,10 +5,15 @@ const send = document.querySelector('#send');
 const attachments = document.querySelector('#attachments');
 const preview = document.querySelector('#attachment-preview');
 const statusText = document.querySelector('#status-text');
+const exportReport = document.querySelector('#export-report');
+const suggestedQuestions = JSON.parse(
+  document.querySelector('#suggested-questions-data').textContent
+);
 let selectedFiles = [];
 let activeStream = null;
 let activeLoadingMessage = null;
 let isBusy = false;
+let completedQaCount = 0;
 const maxFiles = Number(form.dataset.maxFiles);
 const maxFileBytes = Number(form.dataset.maxFileBytes);
 const maxTotalBytes = Number(form.dataset.maxTotalBytes);
@@ -16,6 +21,10 @@ const allowedImageTypes = new Set(['image/jpeg', 'image/png', 'image/webp']);
 
 function updateSendState() {
   send.disabled = isBusy || (!question.value.trim() && selectedFiles.length === 0);
+}
+
+function updateReportState() {
+  exportReport.disabled = isBusy || completedQaCount === 0;
 }
 
 function setStatus(text = '') {
@@ -29,6 +38,7 @@ function setBusy(busy) {
   attachments.disabled = busy;
   messages.setAttribute('aria-busy', String(busy));
   updateSendState();
+  updateReportState();
 }
 
 function appendMessage(role, content, citations = [], answerHtml = null, itemQuestion = null, beforeNode = null) {
@@ -41,6 +51,7 @@ function appendMessage(role, content, citations = [], answerHtml = null, itemQue
     article.appendChild(heading);
   }
   const answer = document.createElement('div');
+  answer.className = 'answer-content';
   if (role === 'assistant' && answerHtml !== null) answer.innerHTML = answerHtml;
   else answer.textContent = content;
   article.appendChild(answer);
@@ -49,9 +60,12 @@ function appendMessage(role, content, citations = [], answerHtml = null, itemQue
     list.className = 'citations';
     citations.forEach((citation, index) => {
       const line = document.createElement('div');
+      const pages = citation.page_start === citation.page_end
+        ? `第 ${citation.page_start} 頁`
+        : `第 ${citation.page_start}~${citation.page_end} 頁`;
       line.textContent = citation.source_type === 'attachment'
         ? `[附件] ${citation.name}`
-        : `[${index + 1}] ${citation.document_name}，第 ${citation.page_start}-${citation.page_end} 頁`;
+        : `[${index + 1}] ${citation.document_name}，${pages}`;
       list.appendChild(line);
       if (citation.crop_url) {
         const image = document.createElement('img');
@@ -64,6 +78,96 @@ function appendMessage(role, content, citations = [], answerHtml = null, itemQue
   }
   messages.insertBefore(article, beforeNode);
   article.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  return article;
+}
+
+function answerPresentation(item) {
+  if (item.route === 'security_request') {
+    return { className: 'route-security', label: '安全限制' };
+  }
+  if (item.route === 'out_of_scope') {
+    return { className: 'route-out-of-scope', label: '超出文件範圍' };
+  }
+  if (item.insufficient_context) {
+    return { className: 'route-insufficient', label: '文件資訊不足' };
+  }
+  return { className: '', label: '' };
+}
+
+async function postQaAction(qaId, payload) {
+  const response = await fetch(`/api/chat/qa/${encodeURIComponent(qaId)}/actions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  const body = await response.json();
+  if (!response.ok) throw new Error(body.message || '無法記錄操作');
+  return body;
+}
+
+function updateFeedbackButtons(container, feedback) {
+  container.querySelector('[data-feedback="1"]').classList.toggle('active', feedback === 1);
+  container.querySelector('[data-feedback="-1"]').classList.toggle('active', feedback === -1);
+  container.querySelector('[data-feedback="1"]').setAttribute('aria-pressed', String(feedback === 1));
+  container.querySelector('[data-feedback="-1"]').setAttribute('aria-pressed', String(feedback === -1));
+}
+
+function appendAnswer(item, beforeNode = null) {
+  const article = appendMessage(
+    'assistant', item.answer, item.citations || [],
+    item.answer_html || null, item.question, beforeNode
+  );
+  const presentation = answerPresentation(item);
+  if (presentation.className) article.classList.add(presentation.className);
+  if (presentation.label) {
+    const label = document.createElement('span');
+    label.className = 'answer-label';
+    label.textContent = presentation.label;
+    article.insertBefore(label, article.querySelector('.answer-content'));
+  }
+  if (!item.qa_id) return article;
+
+  const actions = document.createElement('div');
+  actions.className = 'answer-actions';
+  const copyButton = document.createElement('button');
+  copyButton.type = 'button';
+  copyButton.textContent = '複製';
+  copyButton.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(item.answer || '');
+      await postQaAction(item.qa_id, { action: 'copy' });
+      copyButton.textContent = '已複製';
+      setTimeout(() => { copyButton.textContent = '複製'; }, 1200);
+    } catch (error) {
+      setStatus(error.message || '複製失敗');
+    }
+  });
+  const likeButton = document.createElement('button');
+  likeButton.type = 'button';
+  likeButton.dataset.feedback = '1';
+  likeButton.textContent = '👍';
+  const dislikeButton = document.createElement('button');
+  dislikeButton.type = 'button';
+  dislikeButton.dataset.feedback = '-1';
+  dislikeButton.textContent = '👎';
+  [likeButton, dislikeButton].forEach(button => {
+    button.addEventListener('click', async () => {
+      const selected = Number(button.dataset.feedback);
+      const next = item.feedback === selected ? 0 : selected;
+      try {
+        const result = await postQaAction(item.qa_id, {
+          action: 'feedback', feedback: next,
+        });
+        item.feedback = result.feedback;
+        updateFeedbackButtons(actions, item.feedback);
+      } catch (error) {
+        setStatus(error.message || '無法更新 Feedback');
+      }
+    });
+  });
+  actions.append(copyButton, likeButton, dislikeButton);
+  article.appendChild(actions);
+  updateFeedbackButtons(actions, item.feedback || 0);
   return article;
 }
 
@@ -103,10 +207,49 @@ function failLoadingMessage(text) {
 }
 
 function renderResult(result, beforeNode = null) {
-  result.items.forEach(item => appendMessage(
-    'assistant', item.answer, item.citations || [],
-    item.answer_html || null, item.question, beforeNode
-  ));
+  result.items.forEach(item => appendAnswer(item, beforeNode));
+  completedQaCount += result.items.length;
+  updateReportState();
+}
+
+function removeWelcome() {
+  document.querySelector('.welcome-panel')?.remove();
+}
+
+function renderWelcome() {
+  if (document.querySelector('.welcome-panel') || completedQaCount > 0) return;
+  const panel = document.createElement('section');
+  panel.className = 'welcome-panel';
+  const title = document.createElement('h2');
+  title.textContent = '此為 CMP 化學機械研磨機操作規範，歡迎使用';
+  const description = document.createElement('p');
+  description.textContent = '可直接輸入問題，或選擇下列提示問題開始。';
+  const choices = document.createElement('div');
+  choices.className = 'suggested-questions';
+  suggestedQuestions.forEach(text => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'suggested-question';
+    button.textContent = text;
+    button.addEventListener('click', async () => {
+      question.value = text;
+      updateSendState();
+      question.focus();
+      try {
+        const response = await fetch('/api/chat/suggestions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ question: text }),
+        });
+        if (!response.ok) throw new Error('無法記錄提示問題');
+      } catch (error) {
+        setStatus(error.message);
+      }
+    });
+    choices.appendChild(button);
+  });
+  panel.append(title, description, choices);
+  messages.appendChild(panel);
 }
 
 function renderAttachments() {
@@ -191,14 +334,18 @@ question.addEventListener('keydown', event => {
 
 async function loadHistory() {
   const response = await fetch('/api/history');
-  if (!response.ok) return;
+  if (!response.ok) return 0;
   const body = await response.json();
   body.messages.forEach(item => {
     if (item.role === 'assistant' && Array.isArray(item.items)) {
-      item.items.forEach(entry => appendMessage('assistant', entry.answer,
-        entry.citations || [], entry.answer_html || null, entry.question));
+      item.items.forEach(entry => appendAnswer(entry));
     } else appendMessage(item.role, item.content, item.citations || []);
   });
+  completedQaCount = body.messages
+    .filter(item => item.role === 'assistant' && Array.isArray(item.items))
+    .reduce((sum, item) => sum + item.items.length, 0);
+  updateReportState();
+  return completedQaCount;
 }
 
 function watchJob(jobId) {
@@ -245,6 +392,7 @@ form.addEventListener('submit', async event => {
   }
   const text = enteredText || '請分析此圖片';
   const names = selectedFiles.map(file => file.name);
+  removeWelcome();
   appendMessage('user', names.length ? `${text}\n附件：${names.join('、')}` : text);
   const body = new FormData();
   body.append('question', text);
@@ -276,30 +424,78 @@ document.querySelector('#clear').addEventListener('click', async () => {
   }
   messages.replaceChildren();
   activeLoadingMessage = null;
+  completedQaCount = 0;
   setStatus('');
   setBusy(false);
+  renderWelcome();
+});
+
+exportReport.addEventListener('click', async () => {
+  if (exportReport.disabled) return;
+  exportReport.disabled = true;
+  setStatus('');
+  try {
+    const response = await fetch('/api/history/report', { method: 'POST' });
+    if (!response.ok) {
+      const body = await response.json();
+      throw new Error(body.message || '無法輸出對話報告');
+    }
+    const blob = await response.blob();
+    const disposition = response.headers.get('Content-Disposition') || '';
+    const match = disposition.match(/filename="([^"]+)"/);
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = match?.[1] || 'cmp_chat_report.md';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(link.href);
+  } catch (error) {
+    setStatus(error.message);
+  } finally {
+    updateReportState();
+  }
 });
 
 document.querySelector('#end-chat').addEventListener('click', async () => {
   if (activeStream) activeStream.close();
   activeStream = null;
+  setBusy(true);
   const response = await fetch('/api/session/end', { method: 'POST' });
   if (!response.ok) {
     statusText.textContent = '結束對話失敗，請稍後重試。';
+    setBusy(false);
     return;
   }
-  messages.replaceChildren();
-  activeLoadingMessage = null;
-  setBusy(false);
-  setStatus('對話已結束，診斷紀錄已整理。');
+  window.close();
+  setTimeout(() => {
+    document.querySelector('main').innerHTML = [
+      '<section class="ended-panel">',
+      '<h1>對話已結束</h1>',
+      '<p>瀏覽器未允許自動關閉此頁面，現在可以安全地關閉分頁。</p>',
+      '</section>',
+    ].join('');
+  }, 150);
 });
 
 async function restoreActiveJob() {
   const response = await fetch('/api/chat/jobs/active');
-  if (!response.ok) return;
+  if (!response.ok) return false;
   const body = await response.json();
-  if (body.jobs.length) watchJob(body.jobs[0].job_id);
+  if (body.jobs.length) {
+    removeWelcome();
+    watchJob(body.jobs[0].job_id);
+    return true;
+  }
+  return false;
 }
 
-loadHistory().then(restoreActiveJob);
+async function bootstrap() {
+  const count = await loadHistory();
+  const active = await restoreActiveJob();
+  if (!count && !active) renderWelcome();
+}
+
+bootstrap();
 updateSendState();
+updateReportState();

@@ -4,9 +4,12 @@ import json
 import re
 import threading
 import time
+from copy import deepcopy
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
+from uuid import uuid4
 
 from .config import AppConfig
 from .models import AttachmentMetadata, QAHistoryPair, QueryPlan, QueryPlanItem
@@ -28,6 +31,10 @@ class AttachmentRef:
 class Session:
     messages: list[dict[str, object]] = field(default_factory=list)
     qa_history: list[QAHistoryPair] = field(default_factory=list)
+    created_at_utc: str = field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
+    pending_suggestions: list[dict[str, str]] = field(default_factory=list)
     touched_at: float = field(default_factory=time.monotonic)
 
 
@@ -47,7 +54,51 @@ class SessionStore:
 
     def history(self, session_id: str) -> list[dict[str, object]]:
         with self._lock:
-            return list(self.get(session_id).messages)
+            return deepcopy(self.get(session_id).messages)
+
+    def snapshot(self, session_id: str) -> dict[str, object]:
+        with self._lock:
+            session = self.get(session_id)
+            return {
+                'created_at_utc': session.created_at_utc,
+                'messages': deepcopy(session.messages),
+            }
+
+    def set_pending_suggestion(self, session_id: str, question: str) -> None:
+        with self._lock:
+            session = self.get(session_id)
+            session.pending_suggestions.append({
+                'action': 'suggestion_selected',
+                'question': question,
+                'timestamp_utc': datetime.now(timezone.utc).isoformat(),
+            })
+
+    def consume_pending_suggestions(self, session_id: str) -> list[dict[str, str]]:
+        with self._lock:
+            session = self.get(session_id)
+            actions = session.pending_suggestions
+            session.pending_suggestions = []
+            return deepcopy(actions)
+
+    def update_qa_action(
+        self, session_id: str, qa_id: str, action: str, feedback: Optional[int] = None
+    ) -> Optional[dict[str, object]]:
+        with self._lock:
+            session = self.get(session_id)
+            for message in session.messages:
+                for item in message.get('items', []):
+                    if item.get('qa_id') != qa_id:
+                        continue
+                    event: dict[str, object] = {
+                        'action': action,
+                        'timestamp_utc': datetime.now(timezone.utc).isoformat(),
+                    }
+                    if action == 'feedback':
+                        item['feedback'] = feedback
+                        event['feedback'] = feedback
+                    item.setdefault('actions', []).append(event)
+                    return deepcopy(item)
+            return None
 
     def clear(self, session_id: str) -> None:
         with self._lock:
@@ -137,6 +188,11 @@ class ServeChatEngine:
 
         ordered = [results[index] for index in range(len(plan.items))]
         self._check_cancelled(cancelled)
+        for item in ordered:
+            item.update(qa_id=uuid4().hex, feedback=0, actions=[])
+        pending_suggestions = self.sessions.consume_pending_suggestions(session_id)
+        if ordered:
+            ordered[0]['actions'].extend(pending_suggestions)
         session.messages.extend([
             {'role': 'user', 'content': latest_input, 'attachments': attachment_data},
             {'role': 'assistant', 'content': self._history_text(ordered), 'items': ordered},

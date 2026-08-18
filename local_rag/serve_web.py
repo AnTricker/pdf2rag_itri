@@ -4,6 +4,7 @@ import io
 import json
 import shutil
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -25,6 +26,12 @@ SUPPORTED_IMAGES = {
     'PNG': ('image/png', '.png'),
     'WEBP': ('image/webp', '.webp'),
 }
+SUGGESTED_QUESTIONS = [
+    'CMP 機台開機前需要確認哪些項目？',
+    '研磨作業的標準操作流程為何？',
+    '發生異常警報時應如何處理？',
+    '機台清潔與保養有哪些注意事項？',
+]
 
 
 class UploadValidationError(ValueError):
@@ -87,7 +94,8 @@ def create_app(*, config, embedding_backend, chat_backend,
     def home():
         return render_template('index.html', upload_max_files=config.upload_max_files,
                                upload_max_file_mb=config.upload_max_file_bytes // (1024 * 1024),
-                               upload_max_total_mb=config.upload_max_total_bytes // (1024 * 1024))
+                               upload_max_total_mb=config.upload_max_total_bytes // (1024 * 1024),
+                               suggested_questions=SUGGESTED_QUESTIONS)
 
     @app.get('/api/health')
     def health():
@@ -144,10 +152,66 @@ def create_app(*, config, embedding_backend, chat_backend,
     def history():
         return jsonify(messages=sessions.history(g.session_id))
 
+    @app.post('/api/chat/suggestions')
+    def select_suggestion():
+        _require_same_origin()
+        payload = request.get_json(silent=True) or {}
+        question = payload.get('question')
+        if question not in SUGGESTED_QUESTIONS:
+            return jsonify(error_code='invalid_suggestion', message='提示問題不存在'), 400
+        sessions.set_pending_suggestion(g.session_id, question)
+        return ('', 204)
+
+    @app.post('/api/chat/qa/<qa_id>/actions')
+    def qa_action(qa_id: str):
+        _require_same_origin()
+        payload = request.get_json(silent=True) or {}
+        action = payload.get('action')
+        feedback = payload.get('feedback')
+        if action == 'copy':
+            feedback = None
+        elif action == 'feedback':
+            if isinstance(feedback, bool) or feedback not in {-1, 0, 1}:
+                return jsonify(error_code='invalid_feedback', message='Feedback 必須為 -1、0 或 1'), 400
+        else:
+            return jsonify(error_code='invalid_action', message='不支援的操作'), 400
+        updated = sessions.update_qa_action(g.session_id, qa_id, action, feedback)
+        if updated is None:
+            return jsonify(error_code='qa_not_found', message='回答不存在'), 404
+        logger.append(g.session_id, 'qa_action', qa_id=qa_id,
+                      action=action, feedback=feedback)
+        return jsonify(qa_id=qa_id, feedback=updated['feedback'],
+                       actions=updated['actions'])
+
+    @app.post('/api/history/report')
+    def download_report():
+        _require_same_origin()
+        if jobs.active(g.session_id):
+            return jsonify(error_code='job_active', message='回答進行中，暫時無法輸出'), 409
+        snapshot = sessions.snapshot(g.session_id)
+        qa_blocks = _qa_blocks(snapshot['messages'])
+        if not qa_blocks:
+            return jsonify(error_code='empty_history', message='目前沒有可輸出的對話'), 409
+        logger.append(g.session_id, 'session_action', action='export_report')
+        exported_at = datetime.now(timezone.utc)
+        report = _markdown_report(
+            session_id=g.session_id,
+            created_at=str(snapshot['created_at_utc']),
+            exported_at=exported_at.isoformat(),
+            model=str(getattr(chat_backend, 'model', chat_backend.__class__.__name__)),
+            document=f'{output_root.name}/{build_root.name}',
+            qa_blocks=qa_blocks,
+        )
+        filename = f'cmp_chat_{exported_at.strftime("%Y%m%d_%H%M%S")}.md'
+        return Response(report, mimetype='text/markdown; charset=utf-8', headers={
+            'Content-Disposition': f'attachment; filename="{filename}"',
+        })
+
     @app.delete('/api/history')
     def clear_history():
         _require_same_origin()
         jobs.cancel_session(g.session_id)
+        logger.append(g.session_id, 'session_action', action='clear_chat')
         sessions.clear(g.session_id)
         logger.end(g.session_id, 'clear_chat')
         rotate_session()
@@ -157,6 +221,7 @@ def create_app(*, config, embedding_backend, chat_backend,
     def end_session():
         _require_same_origin()
         jobs.cancel_session(g.session_id)
+        logger.append(g.session_id, 'session_action', action='end_chat')
         sessions.clear(g.session_id)
         logger.end(g.session_id, 'user_ended')
         rotate_session()
@@ -178,6 +243,91 @@ def create_app(*, config, embedding_backend, chat_backend,
         return jsonify(error_code='invalid_attachment', message=str(error)), 400
 
     return app
+
+
+def _qa_blocks(messages) -> list[dict[str, object]]:
+    blocks = []
+    attachments = []
+    for message in messages:
+        if message.get('role') == 'user':
+            attachments = message.get('attachments', [])
+            continue
+        if message.get('role') != 'assistant':
+            continue
+        for item in message.get('items', []):
+            blocks.append({**item, 'attachments': attachments})
+    return blocks
+
+
+def _markdown_report(*, session_id: str, created_at: str, exported_at: str,
+                     model: str, document: str, qa_blocks) -> str:
+    feedback_counts = {
+        'like': sum(item.get('feedback') == 1 for item in qa_blocks),
+        'dislike': sum(item.get('feedback') == -1 for item in qa_blocks),
+        'none': sum(item.get('feedback', 0) == 0 for item in qa_blocks),
+    }
+    lines = [
+        '---',
+        'report_version: 1',
+        f'session_id: {json.dumps(session_id, ensure_ascii=False)}',
+        f'created_at: {json.dumps(created_at, ensure_ascii=False)}',
+        f'exported_at: {json.dumps(exported_at, ensure_ascii=False)}',
+        f'model: {json.dumps(model, ensure_ascii=False)}',
+        f'document: {json.dumps(document, ensure_ascii=False)}',
+        f'question_count: {len(qa_blocks)}',
+        'feedback_summary:',
+        f'  like: {feedback_counts["like"]}',
+        f'  dislike: {feedback_counts["dislike"]}',
+        f'  none: {feedback_counts["none"]}',
+        '---',
+        '',
+        '# CMP 化學機械研磨機操作規範－對話報告',
+        '',
+    ]
+    route_names = {
+        'security_request': '安全限制',
+        'out_of_scope': '超出文件範圍',
+        'document_question': '正常查詢',
+    }
+    feedback_names = {-1: '讚', 0: '無回應', 1: '差'}
+    for ordinal, item in enumerate(qa_blocks, start=1):
+        route = item.get('route', 'document_question')
+        category = '文件資訊不足' if item.get('insufficient_context') else route_names.get(route, route)
+        lines.extend([
+            f'## 對話 {ordinal}',
+            '',
+            '### 使用者問題',
+            '',
+            str(item.get('question', '')),
+            '',
+            '### 系統回答',
+            '',
+            str(item.get('answer', '')),
+            '',
+            f'- 回答類型：{category}',
+            f'- Feedback：{feedback_names.get(item.get("feedback", 0), "無回應")}',
+        ])
+        attachments = item.get('attachments', [])
+        if attachments:
+            summary = '、'.join(
+                f'{entry.get("name")}（{entry.get("media_type")}，'
+                f'{entry.get("width")}x{entry.get("height")}）'
+                for entry in attachments
+            )
+            lines.append(f'- 附件：{summary}')
+        citations = item.get('citations', [])
+        if citations:
+            lines.append('- 參考資料：')
+            for citation in citations:
+                if citation.get('source_type') == 'attachment':
+                    lines.append(f'  - 附件：{citation.get("name")}')
+                else:
+                    start = citation.get('page_start')
+                    end = citation.get('page_end')
+                    pages = f'第 {start} 頁' if start == end else f'第 {start}~{end} 頁'
+                    lines.append(f'  - {citation.get("document_name")}，{pages}')
+        lines.append('')
+    return '\n'.join(lines)
 
 
 def _require_same_origin() -> None:

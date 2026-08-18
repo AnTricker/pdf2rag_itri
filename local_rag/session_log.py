@@ -61,17 +61,75 @@ class SessionJsonlLogger:
             if not source_path.is_file():
                 return
             events = [
-                self._human_fields(json.loads(line))
+                json.loads(line)
                 for line in source_path.read_text(encoding="utf-8").splitlines()
                 if line.strip()
             ]
+            pretty = self._pretty_document(session_id, events)
             destination = self.root / f"{stem}.pretty.json"
             temporary = self.root / f".{stem}.pretty.tmp"
             temporary.write_text(
-                json.dumps(events, ensure_ascii=False, indent=2) + "\n",
+                json.dumps(pretty, ensure_ascii=False, indent=2) + "\n",
                 encoding="utf-8",
             )
             temporary.replace(destination)
+
+    @classmethod
+    def _pretty_document(cls, session_id: str, events: list[dict[str, Any]]) -> dict[str, Any]:
+        qa_blocks: list[dict[str, Any]] = []
+        qa_by_id: dict[str, dict[str, Any]] = {}
+        pending_requests: list[dict[str, Any]] = []
+        session_actions: list[dict[str, Any]] = []
+        diagnostics = []
+        ended_at = None
+
+        for event in events:
+            name = event.get("event")
+            if name == "request_received":
+                pending_requests.append(event)
+            elif name == "response_completed":
+                request_event = pending_requests.pop(0) if pending_requests else {}
+                attachments = request_event.get("attachments", [])
+                for item in event.get("output", {}).get("items", []):
+                    block = cls._human_fields({**item, "attachments": attachments})
+                    qa_blocks.append(block)
+                    qa_id = item.get("qa_id")
+                    if isinstance(qa_id, str):
+                        qa_by_id[qa_id] = block
+            elif name == "qa_action":
+                block = qa_by_id.get(str(event.get("qa_id", "")))
+                if block is not None:
+                    action = {
+                        "action": event.get("action"),
+                        "timestamp_utc": event.get("timestamp_utc"),
+                    }
+                    if event.get("action") == "feedback":
+                        block["feedback"] = event.get("feedback")
+                        action["feedback"] = event.get("feedback")
+                    block.setdefault("actions", []).append(action)
+            elif name == "session_action":
+                session_actions.append(cls._human_fields({
+                    "action": event.get("action"),
+                    "timestamp_utc": event.get("timestamp_utc"),
+                }))
+            elif name == "session_end":
+                ended_at = event.get("timestamp_utc")
+
+            if name not in {
+                "request_received", "response_completed", "qa_action", "session_action"
+            }:
+                diagnostics.append(cls._human_fields(event))
+
+        return {
+            "session": {
+                "session_id": session_id,
+                "created_at_utc": events[0].get("timestamp_utc") if events else None,
+                "ended_at_utc": ended_at,
+            },
+            "qa_blocks": qa_blocks,
+            "session_actions": session_actions,
+            "diagnostics": diagnostics,
+        }
 
     @classmethod
     def _human_fields(cls, value: Any) -> Any:
@@ -83,7 +141,7 @@ class SessionJsonlLogger:
                 if (
                     key in cls.machine_only_keys
                     or key.endswith("_sha256")
-                    or key.endswith("_id")
+                    or (key.endswith("_id") and key != "qa_id")
                     or key.endswith("_ids")
                 ):
                     continue
