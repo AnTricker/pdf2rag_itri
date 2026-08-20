@@ -37,6 +37,22 @@ reference DEMO 老人六力衛教 chatbot : http://104.43.109.53:8060/chat
 > Develop Rule👨‍💻: 先在 **開發端💻** 試架pipeline到確定"裝環境+模型設定即可開跑"，再轉移到 **算力端🖥️**跑大模型、大量實驗
 
 ---
+### 820
+- sync IP-log to AMD9700
+- set AMD9700 constant service
+ 
+### 819
+- add IP-log
+- improve UI
+- sync chat pipeline & UI to AMD9700
+ 
+### 817
+- update chat pipeline (5 VLM call ~> 2 VLM call)
+- add file-upload
+- 修復執行時timeout問題
+- 優化前
+- deployed
+
 ### 812
 - (雙端)測試VLM caption的更新，同步到github
 - amd速架一個對外ip
