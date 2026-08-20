@@ -72,6 +72,9 @@ class AppConfig:
     answer_max_retries: int = 1
     session_log_enabled: bool = False
     session_log_root: Optional[Path] = None
+    monitoring_db_path: Optional[Path] = None
+    access_log_root: Optional[Path] = None
+    admin_password: str = ''
     markdown_enabled: bool = True
 
     @classmethod
@@ -151,6 +154,13 @@ class AppConfig:
                     "runtime/logs/chat_sessions",
                 ),
             ),
+            monitoring_db_path=_relative_path(
+                base, get("LOCAL_RAG_MONITORING_DB", "runtime/monitoring.sqlite3")
+            ),
+            access_log_root=_relative_path(
+                base, get("LOCAL_RAG_ACCESS_LOG_ROOT", "runtime/logs/access_sessions")
+            ),
+            admin_password=get("LOCAL_RAG_ADMIN_PASSWORD", ""),
             markdown_enabled=_boolean(get("LOCAL_RAG_MARKDOWN_ENABLED", "true")),
         )
         config.validate()

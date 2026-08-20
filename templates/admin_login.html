@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Monitoring 登入</title>
+  <style>
+    body { font-family: sans-serif; max-width: 32rem; margin: 5rem auto; padding: 1rem; }
+    form { display: grid; gap: 1rem; }
+    input, button { padding: .65rem; font: inherit; }
+    .error { color: #b42318; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Monitoring 管理登入</h1>
+    {% if error %}<p class="error">{{ error }}</p>{% endif %}
+    <form method="post">
+      <label for="password">管理密碼(admin)</label>
+      <input id="password" name="password" type="password" required autofocus>
+      <button type="submit">登入</button>
+    </form>
+  </main>
+</body>
+</html>

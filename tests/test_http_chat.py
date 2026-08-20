@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import sqlite3
 import tempfile
 import time
 import unittest
@@ -22,6 +23,7 @@ from local_rag.models import (
     QueryPlan,
     QueryPlanItem,
 )
+from local_rag.monitoring import MonitoringStore
 from local_rag.serve_web import create_app
 
 
@@ -99,6 +101,9 @@ class HttpChatTests(unittest.TestCase):
             session_log_enabled=True,
             session_log_root=root / 'logs',
             log_root=root / 'runtime-logs',
+            monitoring_db_path=root / 'monitoring.sqlite3',
+            access_log_root=root / 'access-logs',
+            admin_password='admin-test-password',
             retrieval_min_score=0.5,
         )
         self.backend = FakeChatBackend()
@@ -111,6 +116,7 @@ class HttpChatTests(unittest.TestCase):
                 output_root=root,
             )
         self.client = self.app.test_client()
+        self.chat_token = self._start_chat()
 
     def tearDown(self):
         self.app.extensions['chat_job_manager'].shutdown()
@@ -126,18 +132,43 @@ class HttpChatTests(unittest.TestCase):
             time.sleep(0.01)
         self.fail('job did not finish')
 
+    def _start_chat(self, client=None, previous=None, environ_overrides=None):
+        target = client or self.client
+        response = target.post(
+            '/api/chat/session/start',
+            json={'previous_chat_token': previous},
+            environ_overrides=environ_overrides,
+        )
+        self.assertEqual(response.status_code, 200)
+        return response.get_json()['chat_token']
+
+    @staticmethod
+    def _headers(token):
+        return {'X-Chat-Session': token}
+
+    def _post_job(self, data, *, token=None):
+        return self.client.post(
+            '/api/chat/jobs', data=data,
+            headers=self._headers(token or self.chat_token),
+        )
+
     def test_single_question_uses_one_plan_and_one_answer_call(self):
-        response = self.client.post('/api/chat/jobs', data={'question': '如何重設？'})
+        response = self._post_job({'question': '如何重設？'})
         self.assertEqual(response.status_code, 202)
         job_id = response.get_json()['job_id']
         job = self._wait(job_id)
         self.assertEqual(job.status, 'completed')
         self.assertEqual((self.backend.plan_calls, self.backend.answer_calls), (1, 1))
 
-        events = self.client.get(f'/api/chat/jobs/{job_id}/events')
+        stream_token = response.get_json()['stream_token']
+        events = self.client.get(
+            f'/api/chat/jobs/{job_id}/events', query_string={'token': stream_token}
+        )
         self.assertIn(b'event: planning', events.data)
         self.assertIn(b'event: completed', events.data)
-        history = self.client.get('/api/history').get_json()['messages']
+        history = self.client.get(
+            '/api/history', headers=self._headers(self.chat_token)
+        ).get_json()['messages']
         self.assertEqual([item['role'] for item in history], ['user', 'assistant'])
         answer = history[1]['items'][0]
         self.assertEqual(answer['feedback'], 0)
@@ -146,16 +177,20 @@ class HttpChatTests(unittest.TestCase):
         self.assertTrue(list(self.config.session_log_root.glob('*.pretty.json')))
 
     def test_job_is_owned_by_signed_cookie_session(self):
-        response = self.client.post('/api/chat/jobs', data={'question': '如何重設？'})
+        response = self._post_job({'question': '如何重設？'})
         job_id = response.get_json()['job_id']
         other = self.app.test_client()
-        self.assertEqual(other.get(f'/api/chat/jobs/{job_id}/events').status_code, 404)
+        other.get('/')
+        self.assertEqual(other.get(
+            f'/api/chat/jobs/{job_id}/events',
+            query_string={'token': response.get_json()['stream_token']},
+        ).status_code, 409)
 
     def test_multi_question_uses_one_plan_and_one_answer_batch(self):
         backend = MultiChatBackend()
         manager = self.app.extensions['chat_job_manager']
         manager.engine.chat_backend = backend
-        response = self.client.post('/api/chat/jobs', data={
+        response = self._post_job({
             'question': '如何重設？等待多久？',
         })
         job = self._wait(response.get_json()['job_id'])
@@ -167,7 +202,7 @@ class HttpChatTests(unittest.TestCase):
         manager = self.app.extensions['chat_job_manager']
         manager.engine.index.search = lambda vector, top_k: []
         before = self.backend.answer_calls
-        response = self.client.post('/api/chat/jobs', data={'question': '未知內容？'})
+        response = self._post_job({'question': '未知內容？'})
         job = self._wait(response.get_json()['job_id'])
         item = job.events[-1]['result']['items'][0]
         self.assertTrue(item['insufficient_context'])
@@ -180,7 +215,7 @@ class HttpChatTests(unittest.TestCase):
         response = self.client.post('/api/chat/jobs', data={
             'question': '附件內容是什麼？',
             'attachments': (buffer, 'sample.png'),
-        }, content_type='multipart/form-data')
+        }, content_type='multipart/form-data', headers=self._headers(self.chat_token))
         job = self._wait(response.get_json()['job_id'])
         path = job.attachments[0].path
         self.assertEqual(job.status, 'completed')
@@ -192,48 +227,62 @@ class HttpChatTests(unittest.TestCase):
         response = self.client.post('/api/chat/jobs', data={
             'question': '附件內容？',
             'attachments': (io.BytesIO(b'not-an-image'), 'fake.png'),
-        }, content_type='multipart/form-data')
+        }, content_type='multipart/form-data', headers=self._headers(self.chat_token))
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.get_json()['error_code'], 'invalid_attachment')
+        rows = self.app.extensions['monitoring_store'].query()
+        chat_row = next(row for row in rows if row['chat_session_id'])
+        self.assertEqual(chat_row['has_chat'], 0)
+        self.assertIsNone(chat_row['chat_log_path'])
+        self.assertFalse(list(self.config.session_log_root.glob('*')))
 
     def test_suggestion_and_qa_actions_are_stored_in_qa_block(self):
         suggestion = 'CMP 機台開機前需要確認哪些項目？'
-        selected = self.client.post('/api/chat/suggestions', json={'question': suggestion})
+        selected = self.client.post('/api/chat/suggestions', json={'question': suggestion},
+                                    headers=self._headers(self.chat_token))
         self.assertEqual(selected.status_code, 204)
-        response = self.client.post('/api/chat/jobs', data={'question': suggestion})
+        response = self._post_job({'question': suggestion})
         self._wait(response.get_json()['job_id'])
-        item = self.client.get('/api/history').get_json()['messages'][1]['items'][0]
+        item = self.client.get('/api/history', headers=self._headers(
+            self.chat_token)).get_json()['messages'][1]['items'][0]
         self.assertEqual(item['actions'][0]['action'], 'suggestion_selected')
 
         updated = self.client.post(
             f'/api/chat/qa/{item["qa_id"]}/actions',
             json={'action': 'feedback', 'feedback': 1},
+            headers=self._headers(self.chat_token),
         )
         self.assertEqual(updated.status_code, 200)
         self.assertEqual(updated.get_json()['feedback'], 1)
         copied = self.client.post(
             f'/api/chat/qa/{item["qa_id"]}/actions',
             json={'action': 'copy'},
+            headers=self._headers(self.chat_token),
         )
         self.assertEqual(copied.status_code, 200)
-        history_item = self.client.get('/api/history').get_json()['messages'][1]['items'][0]
+        history_item = self.client.get('/api/history', headers=self._headers(
+            self.chat_token)).get_json()['messages'][1]['items'][0]
         self.assertEqual(history_item['feedback'], 1)
         self.assertEqual([entry['action'] for entry in history_item['actions']],
                          ['suggestion_selected', 'feedback', 'copy'])
 
         other = self.app.test_client()
+        other_token = self._start_chat(other)
         denied = other.post(
             f'/api/chat/qa/{item["qa_id"]}/actions',
             json={'action': 'feedback', 'feedback': -1},
+            headers=self._headers(other_token),
         )
         self.assertEqual(denied.status_code, 404)
 
     def test_markdown_report_is_downloaded_without_disk_copy(self):
-        empty = self.client.post('/api/history/report')
+        empty = self.client.post('/api/history/report',
+                                 headers=self._headers(self.chat_token))
         self.assertEqual(empty.status_code, 409)
-        response = self.client.post('/api/chat/jobs', data={'question': '如何重設？'})
+        response = self._post_job({'question': '如何重設？'})
         self._wait(response.get_json()['job_id'])
-        report = self.client.post('/api/history/report')
+        report = self.client.post('/api/history/report',
+                                  headers=self._headers(self.chat_token))
         self.assertEqual(report.status_code, 200)
         self.assertIn('attachment; filename="cmp_chat_', report.headers['Content-Disposition'])
         text = report.data.decode('utf-8')
@@ -242,17 +291,140 @@ class HttpChatTests(unittest.TestCase):
         self.assertIn('manual.pdf，第 4 頁', text)
         self.assertFalse(list(self.config.session_log_root.glob('*.md')))
 
-    def test_end_session_cancels_jobs_rotates_cookie_and_finishes_log(self):
+    def test_end_session_keeps_access_cookie_and_finishes_chat_log(self):
+        response = self._post_job({'question': '結束前先提問'})
+        self._wait(response.get_json()['job_id'])
         self.client.get('/')
         before = self.client.get_cookie('local_rag_session').value
-        ended = self.client.post('/api/session/end')
+        ended = self.client.post('/api/session/end',
+                                 headers=self._headers(self.chat_token))
         self.assertEqual(ended.status_code, 204)
         after = self.client.get_cookie('local_rag_session').value
-        self.assertNotEqual(before, after)
+        self.assertEqual(before, after)
         pretty = json.loads(next(self.config.session_log_root.glob('*.pretty.json')).read_text(encoding='utf-8'))
         self.assertIn('qa_blocks', pretty)
         self.assertEqual(pretty['session_actions'][-1]['action'], 'end_chat')
         self.assertEqual(pretty['diagnostics'][-1]['event'], 'session_end')
+
+    def test_refresh_keeps_empty_session_rows_without_chat_logs(self):
+        first = self.chat_token
+        second = self._start_chat(previous=first)
+        third = self._start_chat(previous=second)
+        rows = [row for row in self.app.extensions['monitoring_store'].query()
+                if row['chat_session_id']]
+        self.assertEqual(len(rows), 3)
+        self.assertTrue(all(row['has_chat'] == 0 for row in rows))
+        self.assertTrue(all(row['chat_log_path'] is None for row in rows))
+        self.assertFalse(list(self.config.session_log_root.glob('*')))
+        self.assertIsNotNone(third)
+
+    def test_one_tab_can_have_chat_while_another_remains_empty(self):
+        tab_with_chat = self.chat_token
+        empty_tab = self._start_chat()
+        response = self._post_job({'question': '只有 A 分頁提問'}, token=tab_with_chat)
+        self._wait(response.get_json()['job_id'])
+
+        rows = [row for row in self.app.extensions['monitoring_store'].query()
+                if row['chat_session_id']]
+        states = {row['chat_session_id']: row for row in rows}
+        with_chat = next(row for row in rows if row['has_chat'] == 1)
+        without_chat = next(row for row in rows if row['has_chat'] == 0)
+        self.assertTrue(Path(with_chat['chat_log_path']).is_file())
+        self.assertIsNone(without_chat['chat_log_path'])
+        self.assertEqual(len(states), 2)
+        self.assertIsNotNone(empty_tab)
+
+    def test_multiple_tabs_and_refresh_have_independent_chat_sessions(self):
+        tab_a = self.chat_token
+        tab_b = self._start_chat()
+        first = self._post_job({'question': 'A 分頁'}, token=tab_a)
+        second = self._post_job({'question': 'B 分頁'}, token=tab_b)
+        self._wait(first.get_json()['job_id'])
+        self._wait(second.get_json()['job_id'])
+
+        history_a = self.client.get('/api/history', headers=self._headers(tab_a)).get_json()
+        history_b = self.client.get('/api/history', headers=self._headers(tab_b)).get_json()
+        self.assertEqual(history_a['messages'][0]['content'], 'A 分頁')
+        self.assertEqual(history_b['messages'][0]['content'], 'B 分頁')
+
+        refreshed = self._start_chat(previous=tab_a)
+        self.assertEqual(self.client.get('/api/history', headers=self._headers(tab_a)).status_code, 409)
+        self.assertEqual(self.client.get('/api/history', headers=self._headers(tab_b)).status_code, 200)
+        self.assertEqual(self.client.get('/api/history', headers=self._headers(refreshed)).status_code, 200)
+        rows = self.app.extensions['monitoring_store'].query()
+        self.assertIn('page_reloaded', {row['end_reason'] for row in rows})
+
+    def test_ip_change_rotates_access_and_ends_all_chats(self):
+        tab_b = self._start_chat()
+        before = self.client.get_cookie('local_rag_session').value
+        changed = self.client.get(
+            '/api/history', headers=self._headers(self.chat_token),
+            environ_overrides={'REMOTE_ADDR': '10.0.0.25'},
+        )
+        self.assertEqual(changed.status_code, 409)
+        self.assertNotEqual(before, self.client.get_cookie('local_rag_session').value)
+        rows = self.app.extensions['monitoring_store'].query()
+        ended = {row['chat_session_id']: row['end_reason'] for row in rows
+                 if row['chat_session_id']}
+        chat_ids = {
+            self.app.extensions['monitoring_store'].query(
+                chat_session_id=row['chat_session_id']
+            )[0]['chat_session_id']
+            for row in rows if row['chat_session_id']
+        }
+        self.assertGreaterEqual(len(chat_ids), 2)
+        self.assertTrue(all(reason == 'network_changed' for reason in ended.values()))
+        self.assertIsNotNone(tab_b)
+
+    def test_access_log_mapping_and_local_admin(self):
+        self.client.get('/api/health', query_string={'secret': 'do-not-log'},
+                        headers={'Authorization': 'secret-token'})
+        access_files = list(self.config.access_log_root.glob('*.jsonl'))
+        self.assertEqual(len(access_files), 1)
+        text = access_files[0].read_text(encoding='utf-8')
+        self.assertIn('"path": "/api/health"', text)
+        self.assertNotIn('do-not-log', text)
+        self.assertNotIn('secret-token', text)
+
+        remote = self.app.test_client().get(
+            '/admin/login', environ_overrides={'REMOTE_ADDR': '10.0.0.9'}
+        )
+        self.assertEqual(remote.status_code, 403)
+        login = self.client.post('/admin/login', data={'password': 'admin-test-password'})
+        self.assertEqual(login.status_code, 302)
+        page = self.client.get('/admin/monitoring')
+        self.assertEqual(page.status_code, 200)
+        self.assertIn(b'Monitoring', page.data)
+        self.assertIn('空'.encode('utf-8'), page.data)
+
+    def test_monitoring_schema_migrates_existing_chat_state(self):
+        root = Path(self.temp_dir.name) / 'migration'
+        root.mkdir()
+        database = root / 'old.sqlite3'
+        pretty = root / 'old.pretty.json'
+        raw = root / 'old.jsonl'
+        raw.write_text(
+            json.dumps({'event': 'job_queued'}, ensure_ascii=False) + '\n',
+            encoding='utf-8',
+        )
+        with sqlite3.connect(database) as connection:
+            connection.execute(
+                'CREATE TABLE session_map ('
+                'id INTEGER PRIMARY KEY AUTOINCREMENT, access_session_id TEXT NOT NULL, '
+                'chat_session_id TEXT, ip_addr TEXT NOT NULL, first_seen_utc TEXT NOT NULL, '
+                'last_seen_utc TEXT NOT NULL, ended_at_utc TEXT, end_reason TEXT, '
+                'access_log_path TEXT NOT NULL, chat_log_path TEXT)'
+            )
+            connection.execute(
+                'INSERT INTO session_map '
+                '(access_session_id, chat_session_id, ip_addr, first_seen_utc, '
+                'last_seen_utc, access_log_path, chat_log_path) '
+                'VALUES (?, ?, ?, ?, ?, ?, ?)',
+                ('access-old', 'chat-old', '127.0.0.1', '2026-01-01', '2026-01-01',
+                 str(root / 'access.jsonl'), str(pretty)),
+            )
+        migrated = MonitoringStore(database, root / 'access')
+        self.assertEqual(migrated.chat_row('chat-old')['has_chat'], 1)
 
 
 if __name__ == '__main__':

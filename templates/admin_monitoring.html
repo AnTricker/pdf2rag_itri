@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Monitoring</title>
+  <style>
+    body { font-family: sans-serif; margin: 1.5rem; color: #17202a; }
+    header { display: flex; justify-content: space-between; align-items: center; }
+    form.filters { display: grid; grid-template-columns: repeat(5, minmax(10rem, 1fr)); gap: .75rem; margin: 1rem 0; }
+    input, button { padding: .5rem; font: inherit; }
+    table { width: 100%; border-collapse: collapse; font-size: .88rem; }
+    th, td { border: 1px solid #ccd1d1; padding: .45rem; text-align: left; vertical-align: top; }
+    code, pre { font-family: ui-monospace, monospace; }
+    pre { white-space: pre-wrap; overflow-wrap: anywhere; background: #f4f6f7; padding: 1rem; }
+    .events li { margin-bottom: .75rem; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1><a href="{{ url_for('admin_monitoring') }}">Monitoring</a></h1>
+    <form method="post" action="{{ url_for('admin_logout') }}"><button type="submit">登出</button></form>
+  </header>
+
+  {% if rows is not none %}
+  <form class="filters" method="get">
+    <input name="ip_addr" placeholder="IP" value="{{ filters.ip_addr }}">
+    <input name="access_session_id" placeholder="Access session ID" value="{{ filters.access_session_id }}">
+    <input name="chat_session_id" placeholder="Chat session ID" value="{{ filters.chat_session_id }}">
+    <input name="from_utc" placeholder="From UTC" value="{{ filters.from_utc }}">
+    <input name="to_utc" placeholder="To UTC" value="{{ filters.to_utc }}">
+    <button type="submit">查詢</button>
+  </form>
+  <table>
+    <thead><tr><th>IP</th><th>Access session</th><th>Session</th><th>狀態</th><th>First seen</th><th>Last seen</th><th>End</th><th>Log path</th></tr></thead>
+    <tbody>
+      {% for row in rows %}
+      <tr>
+        <td>{{ row.ip_addr }}</td>
+        <td><a href="{{ url_for('admin_access_detail', access_session_id=row.access_session_id) }}"><code>{{ row.access_session_id }}</code></a></td>
+        <td>{% if row.chat_session_id %}{% if row.has_chat %}<a href="{{ url_for('admin_chat_detail', chat_session_id=row.chat_session_id) }}"><code>{{ row.chat_session_id }}</code></a>{% else %}<code>{{ row.chat_session_id }}</code>{% endif %}{% endif %}</td>
+        <td>{% if row.chat_session_id %}{{ '有' if row.has_chat else '空' }}{% else %}access{% endif %}</td>
+        <td>{{ row.first_seen_utc }}</td><td>{{ row.last_seen_utc }}</td>
+        <td>{{ row.end_reason or '' }}</td>
+        <td><code>{{ row.chat_log_path or row.access_log_path }}</code></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+    <h2>{{ detail_title }}</h2>
+    {% if events is not none %}
+      <p><a href="?page={{ page }}&show_noise={{ 0 if show_noise else 1 }}">{{ '隱藏' if show_noise else '顯示' }} static/health</a></p>
+      <ol class="events">{% for event in events %}<li><pre>{{ event | tojson(indent=2) }}</pre></li>{% endfor %}</ol>
+    {% elif history %}
+      <pre>{{ history | tojson(indent=2) }}</pre>
+    {% else %}
+      <p>目前沒有可顯示的紀錄。</p>
+    {% endif %}
+  {% endif %}
+</body>
+</html>

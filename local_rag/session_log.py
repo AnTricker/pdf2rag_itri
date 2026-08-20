@@ -35,16 +35,27 @@ class SessionJsonlLogger:
             **data,
         }
         with self._lock:
-            stem = self._session_stems.setdefault(
-                session_id,
-                datetime.now().astimezone().strftime("%Y-%m-%d_%H-%M-%S-%f"),
-            )
+            stem = self._reserve_stem(session_id)
             path = self.root / f"{stem}.jsonl"
             with path.open("a", encoding="utf-8", newline="\n") as output:
                 output.write(json.dumps(payload, ensure_ascii=False, default=str))
                 output.write("\n")
 
         self._write_pretty(session_id)
+
+    def reserve(self, session_id: str) -> Optional[Path]:
+        if not self.enabled or self.root is None:
+            return None
+        self.root.mkdir(parents=True, exist_ok=True)
+        with self._lock:
+            stem = self._reserve_stem(session_id)
+            return (self.root / f"{stem}.pretty.json").resolve()
+
+    def _reserve_stem(self, session_id: str) -> str:
+        return self._session_stems.setdefault(
+            session_id,
+            datetime.now().astimezone().strftime("%Y-%m-%d_%H-%M-%S-%f"),
+        )
 
     def end(self, session_id: str, reason: str) -> None:
         self.append(session_id, "session_end", reason=reason)

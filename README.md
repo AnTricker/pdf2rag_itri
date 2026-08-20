@@ -78,11 +78,11 @@ runtime/outputs/<timestamp>/
    └─ build_report.json
 ~~~
 #### (8/15) update ```--serve```
-- Serve 啟動時會先 warm LLM；warm 失敗時直接退出，成功後才由 Waitress 開放連線。部署前必須設定 `LOCAL_RAG_SESSION_SECRET`，AMD 單 GPU 建議以 `OLLAMA_NUM_PARALLEL=1` 啟動 Ollama。
+- Serve 啟動時會先 warm LLM；warm 失敗時直接退出，成功後才由 Waitress 開放連線。部署前必須設定 `LOCAL_RAG_SESSION_SECRET` 與 `LOCAL_RAG_ADMIN_PASSWORD`，AMD 單 GPU 建議以 `OLLAMA_NUM_PARALLEL=1` 啟動 Ollama。
 
 - Chat 使用一次 Query Planner 完成拆題、routing 與 retrieval queries，再由程式檢索，最後以最少必要的 Answer batches 產生回答。一般單題只需兩次 LLM 呼叫。Planner 失敗不重試；Answer schema 或引用驗證失敗才重試一次，HTTP timeout 不重試。
 
-- 前端以 server-signed cookie 隔離 session，透過 job queue 與 SSE 在對話框內顯示排隊、規劃、檢索、圖片分析及回答階段。每次 QA 可選擇或直接貼上最多三張 JPEG/PNG/WebP；附件只用於當次 QA，完成後刪除，不加入知識庫。Enter 可直接送出，Shift+Enter 換行。
+- 前端以 server-signed cookie 識別 browser access session，各分頁另以 `sessionStorage` 保存獨立 chat session。透過 job queue 與 SSE 在對話框內顯示排隊、規劃、檢索、圖片分析及回答階段。每次 QA 可選擇或直接貼上最多三張 JPEG/PNG/WebP；附件只用於當次 QA，完成後刪除，不加入知識庫。Enter 可直接送出，Shift+Enter 換行。
 
 #### (8/18) update ```--serve```
 - 空對話會顯示 CMP 操作規範歡迎訊息與 hardcode 提示問題。回答依正常查詢、超出範圍、安全限制及文件資訊不足呈現不同狀態；每個 QA block 可複製、按讚或倒讚。引用單頁顯示「第 n 頁」，跨頁顯示「第 n~m 頁」，引用到 image record 時會在參考資料顯示 crop。
@@ -91,7 +91,9 @@ runtime/outputs/<timestamp>/
 
 - `runtime/logs/chat_sessions/<timestamp>.jsonl` 保存 machine events；同名 `.pretty.json` 在每個重要事件後即時 atomic 更新，並依 `session`、`qa_blocks`、`session_actions`、`diagnostics` 分組。QA block 保存 feedback 與複製／提示問題操作時間，Session actions 保存輸出報告、清除及結束操作；log 排除完整 prompt、raw output、hidden thinking 與附件內容。
 
-- 按「清除對話」會清空 history、輪替 cookie 並重新顯示歡迎區。按「結束對話」會取消該 Session 工作、清除 history、完成 log、輪替 cookie 並嘗試關閉分頁；若瀏覽器禁止自動關閉，頁面會顯示可安全關閉的提示。
+- 按「清除對話」會結束目前分頁的 chat session 並建立新對話。按「結束對話」會取消目前分頁的工作、完成 log 並嘗試關閉分頁；其他分頁不受影響。Refresh 會完成舊 chat log 並建立新 chat session。
+
+- `runtime/logs/access_sessions/` 保存每個 browser access session 的 JSONL access log，`runtime/monitoring.sqlite3` 關聯 IP、access session、tab session 與 chat log path。每個 tab／refresh 都保留空／有狀態；只有送出第一個有效問題後才建立 chat JSON，避免保存無內容的 chat logs。唯讀查詢介面位於 `/admin/monitoring`，僅允許 server 本機並需管理密碼登入；IP 直接取自 `request.remote_addr`。
 
 ---
 ## AMD ROCm / PyTorch Setup Notes

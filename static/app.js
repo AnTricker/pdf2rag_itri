@@ -14,10 +14,44 @@ let activeStream = null;
 let activeLoadingMessage = null;
 let isBusy = false;
 let completedQaCount = 0;
+let chatToken = null;
+const chatTokenStorageKey = 'local_rag_chat_session';
 const maxFiles = Number(form.dataset.maxFiles);
 const maxFileBytes = Number(form.dataset.maxFileBytes);
 const maxTotalBytes = Number(form.dataset.maxTotalBytes);
 const allowedImageTypes = new Set(['image/jpeg', 'image/png', 'image/webp']);
+
+async function startChatSession(previousChatToken = null) {
+  const response = await fetch('/api/chat/session/start', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ previous_chat_token: previousChatToken }),
+  });
+  if (!response.ok) throw new Error('無法建立對話 session');
+  const body = await response.json();
+  chatToken = body.chat_token;
+  sessionStorage.setItem(chatTokenStorageKey, chatToken);
+  return body;
+}
+
+async function apiFetch(url, options = {}) {
+  const headers = new Headers(options.headers || {});
+  if (chatToken) headers.set('X-Chat-Session', chatToken);
+  const response = await fetch(url, { ...options, headers });
+  if (response.status === 409) {
+    const body = await response.clone().json().catch(() => ({}));
+    if (body.error_code === 'access_session_changed') {
+      sessionStorage.removeItem(chatTokenStorageKey);
+      chatToken = null;
+      messages.replaceChildren();
+      completedQaCount = 0;
+      await startChatSession();
+      renderWelcome();
+      setStatus('網路環境已改變，已建立新對話。');
+    }
+  }
+  return response;
+}
 
 function updateSendState() {
   send.disabled = isBusy || (!question.value.trim() && selectedFiles.length === 0);
@@ -95,7 +129,7 @@ function answerPresentation(item) {
 }
 
 async function postQaAction(qaId, payload) {
-  const response = await fetch(`/api/chat/qa/${encodeURIComponent(qaId)}/actions`, {
+  const response = await apiFetch(`/api/chat/qa/${encodeURIComponent(qaId)}/actions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -236,7 +270,7 @@ function renderWelcome() {
       updateSendState();
       question.focus();
       try {
-        const response = await fetch('/api/chat/suggestions', {
+        const response = await apiFetch('/api/chat/suggestions', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ question: text }),
@@ -333,7 +367,7 @@ question.addEventListener('keydown', event => {
 });
 
 async function loadHistory() {
-  const response = await fetch('/api/history');
+  const response = await apiFetch('/api/history');
   if (!response.ok) return 0;
   const body = await response.json();
   body.messages.forEach(item => {
@@ -348,11 +382,13 @@ async function loadHistory() {
   return completedQaCount;
 }
 
-function watchJob(jobId) {
+function watchJob(jobId, streamToken) {
   if (activeStream) activeStream.close();
   setBusy(true);
   updateLoadingMessage('等待模型');
-  const stream = new EventSource(`/api/chat/jobs/${encodeURIComponent(jobId)}/events`);
+  const stream = new EventSource(
+    `/api/chat/jobs/${encodeURIComponent(jobId)}/events?token=${encodeURIComponent(streamToken)}`
+  );
   activeStream = stream;
   ['queued', 'started', 'planning', 'retrieval', 'vision', 'answering'].forEach(name => {
     stream.addEventListener(name, event => {
@@ -404,10 +440,10 @@ form.addEventListener('submit', async event => {
   setBusy(true);
   createLoadingMessage('正在建立工作…');
   try {
-    const response = await fetch('/api/chat/jobs', { method: 'POST', body });
+    const response = await apiFetch('/api/chat/jobs', { method: 'POST', body });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.message || '無法建立工作');
-    watchJob(payload.job_id);
+    watchJob(payload.job_id, payload.stream_token);
   } catch (error) {
     failLoadingMessage(error.message);
     setBusy(false);
@@ -417,11 +453,14 @@ form.addEventListener('submit', async event => {
 document.querySelector('#clear').addEventListener('click', async () => {
   if (activeStream) activeStream.close();
   activeStream = null;
-  const response = await fetch('/api/history', { method: 'DELETE' });
+  const response = await apiFetch('/api/history', { method: 'DELETE' });
   if (!response.ok) {
     statusText.textContent = '清除對話失敗，請稍後重試。';
     return;
   }
+  const payload = await response.json();
+  chatToken = payload.chat_token;
+  sessionStorage.setItem(chatTokenStorageKey, chatToken);
   messages.replaceChildren();
   activeLoadingMessage = null;
   completedQaCount = 0;
@@ -435,7 +474,7 @@ exportReport.addEventListener('click', async () => {
   exportReport.disabled = true;
   setStatus('');
   try {
-    const response = await fetch('/api/history/report', { method: 'POST' });
+    const response = await apiFetch('/api/history/report', { method: 'POST' });
     if (!response.ok) {
       const body = await response.json();
       throw new Error(body.message || '無法輸出對話報告');
@@ -461,12 +500,14 @@ document.querySelector('#end-chat').addEventListener('click', async () => {
   if (activeStream) activeStream.close();
   activeStream = null;
   setBusy(true);
-  const response = await fetch('/api/session/end', { method: 'POST' });
+  const response = await apiFetch('/api/session/end', { method: 'POST' });
   if (!response.ok) {
     statusText.textContent = '結束對話失敗，請稍後重試。';
     setBusy(false);
     return;
   }
+  sessionStorage.removeItem(chatTokenStorageKey);
+  chatToken = null;
   window.close();
   setTimeout(() => {
     document.querySelector('main').innerHTML = [
@@ -478,24 +519,13 @@ document.querySelector('#end-chat').addEventListener('click', async () => {
   }, 150);
 });
 
-async function restoreActiveJob() {
-  const response = await fetch('/api/chat/jobs/active');
-  if (!response.ok) return false;
-  const body = await response.json();
-  if (body.jobs.length) {
-    removeWelcome();
-    watchJob(body.jobs[0].job_id);
-    return true;
-  }
-  return false;
-}
-
 async function bootstrap() {
+  const previousChatToken = sessionStorage.getItem(chatTokenStorageKey);
+  await startChatSession(previousChatToken);
   const count = await loadHistory();
-  const active = await restoreActiveJob();
-  if (!count && !active) renderWelcome();
+  if (!count) renderWelcome();
 }
 
-bootstrap();
+bootstrap().catch(error => setStatus(error.message));
 updateSendState();
 updateReportState();
