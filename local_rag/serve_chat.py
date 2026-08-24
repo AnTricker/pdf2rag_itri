@@ -21,6 +21,10 @@ class JobCancelled(RuntimeError):
     pass
 
 
+class ModelStartFailed(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True)
 class AttachmentRef:
     metadata: AttachmentMetadata
@@ -142,6 +146,8 @@ class ServeChatEngine:
         self.session_logger.append(session_id, 'request_received', latest_input=latest_input,
                                    attachments=attachment_data)
         self._check_cancelled(cancelled)
+        if not self._security_pattern.search(latest_input):
+            self._ensure_model(session_id, progress, cancelled)
         progress('planning', message='正在規劃問題')
         plan = self._plan(session_id, latest_input, history)
         results: dict[int, dict[str, object]] = {}
@@ -180,6 +186,7 @@ class ServeChatEngine:
             progress('vision', message='正在分析圖片')
         for ordinal, batch in enumerate(batches, start=1):
             self._check_cancelled(cancelled)
+            self._ensure_model(session_id, progress, cancelled)
             progress('answering', message=f'正在產生答案（{ordinal}/{len(batches)}）')
             batch_paths = self._deduplicated_paths(
                 [path for item in batch for path in image_paths[item['item_index']]]
@@ -210,6 +217,46 @@ class ServeChatEngine:
                                    duration_ms=round((time.monotonic() - started) * 1000, 3),
                                    output=response)
         return response
+
+    def _ensure_model(self, session_id: str, progress, cancelled) -> None:
+        service_ready, loaded = self.chat_backend.model_status()
+        self.session_logger.append(
+            session_id, 'model_state_checked',
+            service_ready=service_ready, loaded=loaded, model=self.chat_backend.model,
+        )
+        if loaded:
+            return
+        self._check_cancelled(cancelled)
+        started = time.monotonic()
+        self.session_logger.append(
+            session_id, 'model_starting',
+            model=self.chat_backend.model, service_ready=service_ready,
+        )
+        progress(
+            'model_starting',
+            message='正在啟動模型，首次回應需要較長時間',
+        )
+        try:
+            metrics = self.chat_backend.warm()
+        except Exception as error:
+            duration_ms = round((time.monotonic() - started) * 1000, 3)
+            self.session_logger.append(
+                session_id, 'model_start_failed',
+                model=self.chat_backend.model, duration_ms=duration_ms,
+                error_type=type(error).__name__,
+            )
+            raise ModelStartFailed('model cold start failed') from error
+        self._check_cancelled(cancelled)
+        duration_ms = round((time.monotonic() - started) * 1000, 3)
+        self.session_logger.append(
+            session_id, 'model_ready',
+            model=self.chat_backend.model, duration_ms=duration_ms, metrics=metrics,
+        )
+        progress(
+            'model_ready',
+            message='模型已啟動，正在分析問題',
+            duration_ms=duration_ms,
+        )
 
     def _plan(self, session_id: str, latest_input: str, history) -> QueryPlan:
         if self._security_pattern.search(latest_input):

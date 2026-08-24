@@ -317,6 +317,8 @@ class OllamaChatBackend:
         self.url = config.llm_url
         self.model = config.llm_model
         self.timeout = config.llm_timeout_seconds
+        self.keep_alive = config.llm_keep_alive
+        self.startup_timeout = config.llm_startup_timeout_seconds
         self.context_tokens = config.llm_context_tokens
         self.splitter_prompt = splitter_prompt
         self.admission_prompt = admission_prompt
@@ -333,13 +335,32 @@ class OllamaChatBackend:
                 'model': self.model,
                 'prompt': '',
                 'stream': False,
-                'keep_alive': -1,
+                'keep_alive': self.keep_alive,
                 'options': {'num_ctx': self.context_tokens},
             },
-            timeout=self.timeout,
+            timeout=self.startup_timeout,
         )
         response.raise_for_status()
         return self._metrics(response.json())
+
+    def model_status(self) -> tuple[bool, bool]:
+        try:
+            response = requests.get(f'{self.url}/api/ps', timeout=min(self.timeout, 5))
+            response.raise_for_status()
+        except requests.RequestException:
+            return False, False
+        expected = self._normalized_model_name(self.model)
+        for item in response.json().get('models', []):
+            for key in ('name', 'model'):
+                candidate = item.get(key)
+                if isinstance(candidate, str) and self._normalized_model_name(candidate) == expected:
+                    return True, True
+        return True, False
+
+    @staticmethod
+    def _normalized_model_name(value: str) -> str:
+        normalized = value.strip()
+        return normalized if ':' in normalized else f'{normalized}:latest'
 
     def unload(self) -> None:
         response = requests.post(
@@ -377,7 +398,7 @@ class OllamaChatBackend:
             'format': schema_type.model_json_schema(),
             'stream': False,
             'think': think,
-            'keep_alive': -1,
+            'keep_alive': self.keep_alive,
             'options': {'num_ctx': self.context_tokens},
         }
         if images:
@@ -393,7 +414,13 @@ class OllamaChatBackend:
         return schema_type.model_validate_json(self._normalized_json(raw)), self._metrics(body)
 
     def _generate(self, prompt: str, *, schema: Optional[dict] = None) -> str:
-        payload = {"model": self.model, "prompt": prompt, "stream": False}
+        payload = {
+            "model": self.model,
+            "prompt": prompt,
+            "stream": False,
+            "keep_alive": self.keep_alive,
+            "options": {"num_ctx": self.context_tokens},
+        }
         if schema is not None:
             payload["format"] = schema
         response = requests.post(

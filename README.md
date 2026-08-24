@@ -42,7 +42,7 @@ python main.py review --output 2026-08-11_15-30-45-123456
 python main.py build --output 2026-08-11_15-30-45-123456 --review 002
 
 # 使用指定 output 中最新的有效 build
-python main.py serve --output 2026-08-11_15-30-45-123456
+python main.py serve --output 2026-08-12_07-40-43-839095
 ~~~
 
 text、image、multi mode 分別控制 Stage 1 的文字與圖片支線。Stage 1/2 永遠不更新正式 RAG；只有 build 會在 output 內建立版本化索引。人工只修改 pending/NNN_records.pretty.json 中標示為 editable 的欄位，不直接修改 JSONL。
@@ -78,11 +78,11 @@ runtime/outputs/<timestamp>/
    └─ build_report.json
 ~~~
 #### (8/15) update ```--serve```
-- Serve 啟動時會先 warm LLM；warm 失敗時直接退出，成功後才由 Waitress 開放連線。部署前必須設定 `LOCAL_RAG_SESSION_SECRET` 與 `LOCAL_RAG_ADMIN_PASSWORD`，AMD 單 GPU 建議以 `OLLAMA_NUM_PARALLEL=1` 啟動 Ollama。
+- Serve 啟動時不預載 LLM，Web 會立即開放；首次實際需要 Planner／Answer 時才按需載入模型。所有 LLM request 使用 `LOCAL_RAG_LLM_KEEP_ALIVE`（預設 `15m`），最後一次推論後由 Ollama 自動卸載；冷啟動 timeout 由 `LOCAL_RAG_LLM_STARTUP_TIMEOUT_SECONDS`（預設 300 秒）控制。部署前必須設定 `LOCAL_RAG_SESSION_SECRET` 與 `LOCAL_RAG_ADMIN_PASSWORD`，AMD 單 GPU 建議以 `OLLAMA_NUM_PARALLEL=1` 啟動 Ollama。
 
 - Chat 使用一次 Query Planner 完成拆題、routing 與 retrieval queries，再由程式檢索，最後以最少必要的 Answer batches 產生回答。一般單題只需兩次 LLM 呼叫。Planner 失敗不重試；Answer schema 或引用驗證失敗才重試一次，HTTP timeout 不重試。
 
-- 前端以 server-signed cookie 識別 browser access session，各分頁另以 `sessionStorage` 保存獨立 chat session。透過 job queue 與 SSE 在對話框內顯示排隊、規劃、檢索、圖片分析及回答階段。每次 QA 可選擇或直接貼上最多三張 JPEG/PNG/WebP；附件只用於當次 QA，完成後刪除，不加入知識庫。Enter 可直接送出，Shift+Enter 換行。
+- 前端以 server-signed cookie 識別 browser access session，各分頁另以 `sessionStorage` 保存獨立 chat session。透過 job queue 與 SSE 在對話框內顯示排隊、模型冷啟動、規劃、檢索、圖片分析及回答階段。冷啟動時會顯示累計等待秒數，模型 ready 後自動進入規劃。每次 QA 可選擇或直接貼上最多三張 JPEG/PNG/WebP；附件只用於當次 QA，完成後刪除，不加入知識庫。Enter 可直接送出，Shift+Enter 換行。
 
 #### (8/18) update ```--serve```
 - 空對話會顯示 CMP 操作規範歡迎訊息與 hardcode 提示問題。回答依正常查詢、超出範圍、安全限制及文件資訊不足呈現不同狀態；每個 QA block 可複製、按讚或倒讚。引用單頁顯示「第 n 頁」，跨頁顯示「第 n~m 頁」，引用到 image record 時會在參考資料顯示 crop。

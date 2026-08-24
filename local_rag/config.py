@@ -53,6 +53,8 @@ class AppConfig:
     llm_backend: str = "ollama"
     llm_model: str = ""
     llm_timeout_seconds: int = 120
+    llm_keep_alive: str = "15m"
+    llm_startup_timeout_seconds: int = 300
     llm_context_tokens: int = 32768
     answer_input_budget_tokens: int = 24576
     web_host: str = "127.0.0.1"
@@ -131,6 +133,10 @@ class AppConfig:
             llm_backend=get("LOCAL_RAG_LLM_BACKEND", "ollama").strip().lower(),
             llm_model=llm_model_value,
             llm_timeout_seconds=int(get("LOCAL_RAG_LLM_TIMEOUT_SECONDS", "120")),
+            llm_keep_alive=get("LOCAL_RAG_LLM_KEEP_ALIVE", "15m").strip(),
+            llm_startup_timeout_seconds=int(
+                get("LOCAL_RAG_LLM_STARTUP_TIMEOUT_SECONDS", "300")
+            ),
             web_host=get("LOCAL_RAG_WEB_HOST", "127.0.0.1"),
             web_port=int(get("LOCAL_RAG_WEB_PORT", "8000")),
             session_ttl_seconds=int(get("LOCAL_RAG_SESSION_TTL_SECONDS", "3600")),
@@ -173,6 +179,8 @@ class AppConfig:
     def validate(self) -> None:
         if self.llm_context_tokens <= 0:
             raise ValueError('llm_context_tokens must be positive')
+        if not self.llm_keep_alive or self.llm_startup_timeout_seconds <= 0:
+            raise ValueError('LLM keep alive and startup timeout must be configured')
         if not 0 < self.answer_input_budget_tokens < self.llm_context_tokens:
             raise ValueError('answer input budget must be smaller than LLM context')
         if self.web_threads <= 0 or self.job_retention_seconds <= 0:

@@ -12,6 +12,7 @@ const suggestedQuestions = JSON.parse(
 let selectedFiles = [];
 let activeStream = null;
 let activeLoadingMessage = null;
+let modelStartTimer = null;
 let isBusy = false;
 let completedQaCount = 0;
 let chatToken = null;
@@ -240,6 +241,22 @@ function failLoadingMessage(text) {
   activeLoadingMessage = null;
 }
 
+function stopModelStartTimer() {
+  if (modelStartTimer !== null) clearInterval(modelStartTimer);
+  modelStartTimer = null;
+}
+
+function startModelStartTimer(message) {
+  stopModelStartTimer();
+  const startedAt = Date.now();
+  const update = () => {
+    const seconds = Math.floor((Date.now() - startedAt) / 1000);
+    updateLoadingMessage(`${message}（已等待 ${seconds} 秒）`);
+  };
+  update();
+  modelStartTimer = setInterval(update, 1000);
+}
+
 function renderResult(result, beforeNode = null) {
   result.items.forEach(item => appendAnswer(item, beforeNode));
   completedQaCount += result.items.length;
@@ -384,19 +401,31 @@ async function loadHistory() {
 
 function watchJob(jobId, streamToken) {
   if (activeStream) activeStream.close();
+  stopModelStartTimer();
   setBusy(true);
   updateLoadingMessage('等待模型');
   const stream = new EventSource(
     `/api/chat/jobs/${encodeURIComponent(jobId)}/events?token=${encodeURIComponent(streamToken)}`
   );
   activeStream = stream;
+  stream.addEventListener('model_starting', event => {
+    const body = JSON.parse(event.data);
+    startModelStartTimer(body.message || '正在啟動模型，首次回應需要較長時間');
+  });
+  stream.addEventListener('model_ready', event => {
+    const body = JSON.parse(event.data);
+    stopModelStartTimer();
+    updateLoadingMessage(body.message || '模型已啟動，正在分析問題');
+  });
   ['queued', 'started', 'planning', 'retrieval', 'vision', 'answering'].forEach(name => {
     stream.addEventListener(name, event => {
       const body = JSON.parse(event.data);
+      if (name === 'planning') stopModelStartTimer();
       updateLoadingMessage(body.message || '處理中…');
     });
   });
   stream.addEventListener('completed', event => {
+    stopModelStartTimer();
     const loadingMessage = activeLoadingMessage;
     renderResult(JSON.parse(event.data).result, loadingMessage);
     loadingMessage?.remove();
@@ -407,6 +436,7 @@ function watchJob(jobId, streamToken) {
     question.focus();
   });
   ['failed', 'cancelled'].forEach(name => stream.addEventListener(name, event => {
+    stopModelStartTimer();
     const body = JSON.parse(event.data);
     stream.close();
     activeStream = null;
@@ -453,6 +483,7 @@ form.addEventListener('submit', async event => {
 document.querySelector('#clear').addEventListener('click', async () => {
   if (activeStream) activeStream.close();
   activeStream = null;
+  stopModelStartTimer();
   const response = await apiFetch('/api/history', { method: 'DELETE' });
   if (!response.ok) {
     statusText.textContent = '清除對話失敗，請稍後重試。';
@@ -499,6 +530,7 @@ exportReport.addEventListener('click', async () => {
 document.querySelector('#end-chat').addEventListener('click', async () => {
   if (activeStream) activeStream.close();
   activeStream = null;
+  stopModelStartTimer();
   setBusy(true);
   const response = await apiFetch('/api/session/end', { method: 'POST' });
   if (!response.ok) {

@@ -188,8 +188,6 @@ def main(argv: Optional[list[str]] = None) -> int:
         )
         output_root = resolver.resolve_output(args.output)
         build_root = resolver.latest_build(output_root)
-        warm_metrics = chat.warm()
-        print(f"[LLM WARM] model={chat.model} metrics={warm_metrics}", file=sys.stderr)
         app = None
         try:
             app = create_app(

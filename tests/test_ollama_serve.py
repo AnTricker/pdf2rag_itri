@@ -33,6 +33,14 @@ class Response:
         }
 
 
+class PsResponse(Response):
+    def __init__(self, models):
+        self.models = models
+
+    def json(self):
+        return {'models': self.models}
+
+
 class OllamaServeTests(unittest.TestCase):
     def test_warm_two_stage_qa_and_unload_payloads(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -64,6 +72,9 @@ class OllamaServeTests(unittest.TestCase):
                 }]})),
                 Response(),
             ]
+            with patch('local_rag.adapters.requests.get',
+                       return_value=PsResponse([{'name': 'gemma-fixture:latest'}])) as get:
+                self.assertEqual(backend.model_status(), (True, True))
             with patch('local_rag.adapters.requests.post', side_effect=responses) as post:
                 backend.warm()
                 backend.plan('如何重設？', [], profile)
@@ -75,13 +86,24 @@ class OllamaServeTests(unittest.TestCase):
                 backend.unload()
 
             self.assertEqual(post.call_count, 4)
+            self.assertEqual(get.call_count, 1)
             payloads = [call.kwargs['json'] for call in post.call_args_list]
-            self.assertEqual(payloads[0]['keep_alive'], -1)
+            self.assertEqual(payloads[0]['keep_alive'], '15m')
+            self.assertEqual(post.call_args_list[0].kwargs['timeout'], 300)
             self.assertEqual(payloads[0]['options']['num_ctx'], 32768)
+            self.assertEqual(payloads[1]['keep_alive'], '15m')
+            self.assertEqual(payloads[2]['keep_alive'], '15m')
             self.assertFalse(payloads[1]['think'])
             self.assertFalse(payloads[2]['think'])
             self.assertNotIn('num_predict', payloads[2]['options'])
             self.assertEqual(payloads[3]['keep_alive'], 0)
+
+            with patch('local_rag.adapters.requests.get',
+                       return_value=PsResponse([])):
+                self.assertEqual(backend.model_status(), (True, False))
+            with patch('local_rag.adapters.requests.get',
+                       side_effect=requests.ConnectionError):
+                self.assertEqual(backend.model_status(), (False, False))
 
     def test_answer_retries_validation_error_but_not_timeout(self):
         with tempfile.TemporaryDirectory() as temp_dir:

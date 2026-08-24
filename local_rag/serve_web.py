@@ -240,8 +240,11 @@ def create_app(*, config, embedding_backend, chat_backend,
 
     @app.get('/api/health')
     def health():
+        llm_service_ready, llm_loaded = chat_backend.model_status()
         return jsonify(configuration_ready=True, snapshot_ready=True,
-                       embedding_ready=True, llm_ready=True)
+                       embedding_ready=True, llm_ready=llm_service_ready,
+                       llm_service_ready=llm_service_ready,
+                       llm_loaded=llm_loaded)
 
     @app.post('/api/chat/session/start')
     def start_chat_session():

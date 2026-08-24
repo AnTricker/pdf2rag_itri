@@ -10,7 +10,7 @@ from uuid import uuid4
 
 import requests
 
-from .serve_chat import AttachmentRef, JobCancelled
+from .serve_chat import AttachmentRef, JobCancelled, ModelStartFailed
 
 
 TERMINAL_STATES = {'completed', 'failed', 'cancelled'}
@@ -134,6 +134,11 @@ class ChatJobManager:
                 self._cleanup_attachments(job)
                 job.status = 'cancelled'
                 self._publish(job, 'cancelled', message='工作已取消')
+            except ModelStartFailed:
+                self._cleanup_attachments(job)
+                job.status = 'failed'
+                self._publish(job, 'failed', error_code='model_start_failed',
+                              message='模型啟動失敗，請稍後再試')
             except requests.Timeout:
                 self._cleanup_attachments(job)
                 job.status = 'failed'
