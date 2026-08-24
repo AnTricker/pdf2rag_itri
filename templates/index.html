@@ -23,6 +23,7 @@
     </header>
     <section id="messages" aria-live="polite" aria-busy="false"></section>
     <script id="suggested-questions-data" type="application/json">{{ suggested_questions | tojson }}</script>
+    <script id="tts-options-data" type="application/json">{{ tts_options | tojson }}</script>
     <form id="chat-form" data-max-files="{{ upload_max_files }}" data-max-file-bytes="{{ upload_max_file_mb * 1024 * 1024 }}" data-max-total-bytes="{{ upload_max_total_mb * 1024 * 1024 }}">
       <label for="question">請輸入文件相關問題</label>
       <div class="composer">

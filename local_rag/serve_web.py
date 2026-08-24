@@ -15,6 +15,8 @@ from flask import Flask, Response, abort, g, jsonify, redirect, render_template,
 from itsdangerous import BadSignature, SignatureExpired, URLSafeSerializer, URLSafeTimedSerializer
 from PIL import Image, UnidentifiedImageError
 
+from TTS.local_tts import DEFAULT_BASE_URL, LocalTTSClient, load_api_token
+
 from .index import FileVectorIndex
 from .jobs import ChatJobManager
 from .models import AttachmentMetadata
@@ -38,6 +40,35 @@ SUGGESTED_QUESTIONS = [
     '發生異常警報時應如何處理？',
     '機台清潔與保養有哪些注意事項？',
 ]
+TTS_OPTIONS = {
+    'default_language': 'TL',
+    'languages': [
+        {
+            'value': 'TW', 'label': '中文', 'default_voice': 'Rena',
+            'voices': [
+                {'value': 'Rena', 'label': '中文女音 — Rena'},
+                {'value': 'Celia_telemarketing', 'label': '中文女音（行銷）— Celia_telemarketing'},
+                {'value': 'Jason', 'label': '中文男音 — Jason'},
+            ],
+        },
+        {
+            'value': 'EN', 'label': '英文', 'default_voice': 'Raina_narrative',
+            'voices': [],
+        },
+        {
+            'value': 'TL', 'label': '中文文字轉台語發音', 'default_voice': 'Easton_news',
+            'voices': [
+                {'value': 'Easton_news', 'label': '台語男音（新聞）— Easton_news'},
+                {'value': 'Raina_narrative', 'label': '台語女音（敘事）— Raina_narrative'},
+                {'value': 'Celia_call_center_taigi', 'label': '台語女音（客服）— Celia_call_center_taigi'},
+            ],
+        },
+        {
+            'value': 'TB', 'label': '台語（台羅）', 'default_voice': 'Raina_narrative',
+            'voices': [],
+        },
+    ],
+}
 
 
 class UploadValidationError(ValueError):
@@ -45,7 +76,7 @@ class UploadValidationError(ValueError):
 
 
 def create_app(*, config, embedding_backend, chat_backend,
-               build_root: Path, output_root: Path) -> Flask:
+               build_root: Path, output_root: Path, tts_client=None) -> Flask:
     if not config.session_secret:
         raise ValueError('LOCAL_RAG_SESSION_SECRET is required for serve')
     if not config.admin_password:
@@ -78,6 +109,7 @@ def create_app(*, config, embedding_backend, chat_backend,
                         if record.source.artifact_path}
     app.extensions['chat_job_manager'] = jobs
     app.extensions['monitoring_store'] = monitoring
+    tts_client_instance = tts_client
     active_chats: dict[str, str] = {}
     materialized_chats: set[str] = set()
     active_chats_lock = threading.RLock()
@@ -236,7 +268,8 @@ def create_app(*, config, embedding_backend, chat_backend,
         return render_template('index.html', upload_max_files=config.upload_max_files,
                                upload_max_file_mb=config.upload_max_file_bytes // (1024 * 1024),
                                upload_max_total_mb=config.upload_max_total_bytes // (1024 * 1024),
-                               suggested_questions=SUGGESTED_QUESTIONS)
+                               suggested_questions=SUGGESTED_QUESTIONS,
+                               tts_options=TTS_OPTIONS)
 
     @app.get('/api/health')
     def health():
@@ -291,6 +324,59 @@ def create_app(*, config, embedding_backend, chat_backend,
         })
         return jsonify(job_id=job.job_id, status=job.status,
                        stream_token=stream_token), 202
+
+    @app.post('/api/tts')
+    @chat_required
+    def synthesize_tts():
+        nonlocal tts_client_instance
+        _require_same_origin()
+        payload = request.get_json(silent=True) or {}
+        text = payload.get('text')
+        lang_type = payload.get('lang_type')
+        if not isinstance(text, str) or not text.strip():
+            return jsonify(error_code='invalid_tts_text', message='語音文字不可空白'), 400
+
+        language = next(
+            (item for item in TTS_OPTIONS['languages'] if item['value'] == lang_type),
+            None,
+        )
+        if language is None:
+            return jsonify(error_code='invalid_tts_language', message='不支援的語言選項'), 400
+
+        allowed_voices = {item['value'] for item in language['voices']}
+        requested_voice = payload.get('voice')
+        if allowed_voices:
+            if requested_voice not in allowed_voices:
+                return jsonify(error_code='invalid_tts_voice', message='不支援的聲音選項'), 400
+            voice = requested_voice
+        else:
+            voice = language['default_voice']
+
+        try:
+            if tts_client_instance is None:
+                token = load_api_token(config.base_dir / 'TTS' / 'API_TOKEN.txt')
+                tts_client_instance = LocalTTSClient(DEFAULT_BASE_URL, token)
+            created = tts_client_instance.synthesize(
+                text=text.strip(), voice=voice, lang_type=lang_type,
+                name=f'chat_tts_{uuid4().hex}',
+            )
+            completed = tts_client_instance.wait_until_complete(
+                created['synthesis_id'], poll_interval=1.0, max_wait=300.0,
+            )
+            synthesis_path = completed.get('synthesis_path') or created.get('synthesis_path')
+            if not synthesis_path:
+                raise RuntimeError('TTS API 未提供音檔 URL')
+            audio = tts_client_instance.download_bytes(synthesis_path)
+        except TimeoutError:
+            return jsonify(error_code='tts_timeout', message='語音合成逾時，請稍後重試'), 504
+        except RuntimeError as error:
+            app.logger.warning('TTS request failed: %s', error)
+            return jsonify(error_code='tts_unavailable', message='語音合成失敗，請稍後重試'), 502
+
+        return Response(audio, mimetype='audio/mpeg', headers={
+            'Cache-Control': 'no-store',
+            'Content-Disposition': 'inline; filename="chat_tts.mp3"',
+        })
 
     @app.get('/api/chat/jobs/active')
     @chat_required

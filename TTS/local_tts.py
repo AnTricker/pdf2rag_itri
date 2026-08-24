@@ -153,6 +153,10 @@ class LocalTTSClient:
                     output.write(chunk)
         return destination
 
+    def download_bytes(self, url: str) -> bytes:
+        """下載合成音檔至記憶體，供 Web API 直接回傳。"""
+        return self._request("GET", url).content
+
 
 def safe_filename(value: str) -> str:
     cleaned = re.sub(r"[^0-9A-Za-z._-]+", "_", value).strip("._")

@@ -74,6 +74,21 @@ class FakeChatBackend:
         ) for item in items])
 
 
+class FakeTTSClient:
+    def __init__(self):
+        self.calls = []
+
+    def synthesize(self, **kwargs):
+        self.calls.append(kwargs)
+        return {'synthesis_id': 'tts-fixture'}
+
+    def wait_until_complete(self, synthesis_id, poll_interval, max_wait):
+        return {'status': 'Success', 'synthesis_path': '/audio/tts-fixture.mp3'}
+
+    def download_bytes(self, url):
+        return b'ID3fixture'
+
+
 class MultiChatBackend(FakeChatBackend):
     def plan(self, latest_input, history, corpus_profile, trace=None):
         self.plan_calls += 1
@@ -121,6 +136,7 @@ class HttpChatTests(unittest.TestCase):
             retrieval_min_score=0.5,
         )
         self.backend = FakeChatBackend()
+        self.tts_client = FakeTTSClient()
         with patch('local_rag.serve_web.FileVectorIndex.load', return_value=FakeIndex(root)):
             self.app = create_app(
                 config=self.config,
@@ -128,6 +144,7 @@ class HttpChatTests(unittest.TestCase):
                 chat_backend=self.backend,
                 build_root=root / 'build',
                 output_root=root,
+                tts_client=self.tts_client,
             )
         self.client = self.app.test_client()
         self.chat_token = self._start_chat()
@@ -189,6 +206,58 @@ class HttpChatTests(unittest.TestCase):
         self.assertEqual(answer['actions'], [])
         self.assertEqual(len(answer['qa_id']), 32)
         self.assertTrue(list(self.config.session_log_root.glob('*.pretty.json')))
+
+    def test_tts_returns_mp3_and_validates_language_voice_mapping(self):
+        response = self.client.post('/api/tts', json={
+            'text': '請按住 RESET 三秒。',
+            'lang_type': 'TL',
+            'voice': 'Easton_news',
+        }, headers=self._headers(self.chat_token))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.mimetype, 'audio/mpeg')
+        self.assertEqual(response.data, b'ID3fixture')
+        self.assertEqual(response.headers['Cache-Control'], 'no-store')
+        self.assertEqual(self.tts_client.calls[-1]['voice'], 'Easton_news')
+
+        invalid = self.client.post('/api/tts', json={
+            'text': '測試', 'lang_type': 'TW', 'voice': 'Easton_news',
+        }, headers=self._headers(self.chat_token))
+        self.assertEqual(invalid.status_code, 400)
+        self.assertEqual(invalid.get_json()['error_code'], 'invalid_tts_voice')
+
+    def test_tts_en_and_tb_use_explicit_fallback_voice(self):
+        for lang_type in ('EN', 'TB'):
+            response = self.client.post('/api/tts', json={
+                'text': 'test', 'lang_type': lang_type, 'voice': None,
+            }, headers=self._headers(self.chat_token))
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(self.tts_client.calls[-1]['lang_type'], lang_type)
+            self.assertEqual(self.tts_client.calls[-1]['voice'], 'Raina_narrative')
+
+    def test_tts_requires_chat_session_and_same_origin(self):
+        missing_session = self.client.post('/api/tts', json={
+            'text': '測試', 'lang_type': 'TL', 'voice': 'Easton_news',
+        })
+        self.assertEqual(missing_session.status_code, 401)
+        cross_origin = self.client.post('/api/tts', json={
+            'text': '測試', 'lang_type': 'TL', 'voice': 'Easton_news',
+        }, headers={**self._headers(self.chat_token), 'Origin': 'https://example.invalid'})
+        self.assertEqual(cross_origin.status_code, 403)
+
+    def test_tts_maps_timeout_and_api_failure(self):
+        self.tts_client.wait_until_complete = lambda *args, **kwargs: (_ for _ in ()).throw(TimeoutError())
+        timeout = self.client.post('/api/tts', json={
+            'text': '測試', 'lang_type': 'TL', 'voice': 'Easton_news',
+        }, headers=self._headers(self.chat_token))
+        self.assertEqual(timeout.status_code, 504)
+        self.assertEqual(timeout.get_json()['error_code'], 'tts_timeout')
+
+        self.tts_client.wait_until_complete = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError('API failed'))
+        failure = self.client.post('/api/tts', json={
+            'text': '測試', 'lang_type': 'TL', 'voice': 'Easton_news',
+        }, headers=self._headers(self.chat_token))
+        self.assertEqual(failure.status_code, 502)
+        self.assertEqual(failure.get_json()['error_code'], 'tts_unavailable')
 
     def test_cold_model_starts_before_planning_and_security_fast_path_skips_it(self):
         self.backend.loaded = False

@@ -9,6 +9,12 @@ const exportReport = document.querySelector('#export-report');
 const suggestedQuestions = JSON.parse(
   document.querySelector('#suggested-questions-data').textContent
 );
+const ttsOptions = JSON.parse(
+  document.querySelector('#tts-options-data').textContent
+);
+const ttsLanguages = new Map(
+  ttsOptions.languages.map(language => [language.value, language])
+);
 let selectedFiles = [];
 let activeStream = null;
 let activeLoadingMessage = null;
@@ -16,6 +22,8 @@ let modelStartTimer = null;
 let isBusy = false;
 let completedQaCount = 0;
 let chatToken = null;
+const ttsCache = new Map();
+const ttsTailByQa = new Map();
 const chatTokenStorageKey = 'local_rag_chat_session';
 const maxFiles = Number(form.dataset.maxFiles);
 const maxFileBytes = Number(form.dataset.maxFileBytes);
@@ -42,6 +50,7 @@ async function apiFetch(url, options = {}) {
   if (response.status === 409) {
     const body = await response.clone().json().catch(() => ({}));
     if (body.error_code === 'access_session_changed') {
+      clearTtsCache();
       sessionStorage.removeItem(chatTokenStorageKey);
       chatToken = null;
       messages.replaceChildren();
@@ -71,9 +80,40 @@ function setBusy(busy) {
   form.classList.toggle('busy', busy);
   question.disabled = busy;
   attachments.disabled = busy;
+  document.querySelectorAll('.tts-actions select, .tts-actions button')
+    .forEach(control => { control.disabled = busy; });
   messages.setAttribute('aria-busy', String(busy));
   updateSendState();
   updateReportState();
+}
+
+function clearTtsCache() {
+  ttsCache.forEach(entry => URL.revokeObjectURL(entry.url));
+  ttsCache.clear();
+  ttsTailByQa.clear();
+}
+
+function insertTtsBlock(sourceArticle, qaId, block) {
+  const anchor = ttsTailByQa.get(qaId) || sourceArticle;
+  anchor.insertAdjacentElement('afterend', block);
+  ttsTailByQa.set(qaId, block);
+  block.scrollIntoView({ behavior: 'smooth', block: 'end' });
+}
+
+function createTtsLoading(sourceArticle, qaId) {
+  const article = document.createElement('article');
+  article.className = 'message assistant loading tts-response';
+  article.setAttribute('role', 'status');
+  const dots = document.createElement('span');
+  dots.className = 'loading-dots';
+  dots.setAttribute('aria-hidden', 'true');
+  dots.innerHTML = '<span></span><span></span><span></span>';
+  const label = document.createElement('span');
+  label.className = 'loading-label';
+  label.textContent = '正在產生語音…';
+  article.append(dots, label);
+  insertTtsBlock(sourceArticle, qaId, article);
+  return article;
 }
 
 function appendMessage(role, content, citations = [], answerHtml = null, itemQuestion = null, beforeNode = null) {
@@ -147,6 +187,109 @@ function updateFeedbackButtons(container, feedback) {
   container.querySelector('[data-feedback="-1"]').setAttribute('aria-pressed', String(feedback === -1));
 }
 
+function appendTtsActions(article, item, actions) {
+  const controls = document.createElement('div');
+  controls.className = 'tts-actions';
+
+  const languageLabel = document.createElement('label');
+  languageLabel.textContent = '語言';
+  const languageSelect = document.createElement('select');
+  languageSelect.setAttribute('aria-label', '語音語言');
+  ttsOptions.languages.forEach(language => {
+    const option = document.createElement('option');
+    option.value = language.value;
+    option.textContent = language.label;
+    option.selected = language.value === ttsOptions.default_language;
+    languageSelect.appendChild(option);
+  });
+  languageLabel.appendChild(languageSelect);
+
+  const voiceDetails = document.createElement('details');
+  voiceDetails.className = 'tts-voice-options';
+  const voiceSummary = document.createElement('summary');
+  voiceSummary.textContent = '進階聲音';
+  const voiceSelect = document.createElement('select');
+  voiceSelect.setAttribute('aria-label', '語音聲音');
+  voiceDetails.append(voiceSummary, voiceSelect);
+
+  const updateVoices = () => {
+    const language = ttsLanguages.get(languageSelect.value);
+    voiceSelect.replaceChildren();
+    language.voices.forEach(voice => {
+      const option = document.createElement('option');
+      option.value = voice.value;
+      option.textContent = voice.label;
+      option.selected = voice.value === language.default_voice;
+      voiceSelect.appendChild(option);
+    });
+    voiceDetails.hidden = language.voices.length === 0;
+    if (voiceDetails.hidden) voiceDetails.open = false;
+  };
+  languageSelect.addEventListener('change', updateVoices);
+  updateVoices();
+
+  const playButton = document.createElement('button');
+  playButton.type = 'button';
+  playButton.textContent = '🔊 播放';
+  playButton.addEventListener('click', async () => {
+    if (isBusy) return;
+    const language = ttsLanguages.get(languageSelect.value);
+    const voice = language.voices.length ? voiceSelect.value : language.default_voice;
+    const cacheKey = `${item.qa_id}:${language.value}:${voice}`;
+    const existing = ttsCache.get(cacheKey);
+    if (existing) {
+      playButton.textContent = '已生成';
+      existing.article.scrollIntoView({ behavior: 'smooth', block: 'end' });
+      setTimeout(() => { playButton.textContent = '🔊 播放'; }, 1200);
+      return;
+    }
+
+    const loading = createTtsLoading(article, item.qa_id);
+    setStatus('');
+    setBusy(true);
+    try {
+      const response = await apiFetch('/api/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text: article.querySelector('.answer-content').innerText.trim(),
+          lang_type: language.value,
+          voice: language.voices.length ? voice : null,
+        }),
+      });
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        throw new Error(body.message || '語音合成失敗，請稍後重試');
+      }
+      const audioUrl = URL.createObjectURL(await response.blob());
+      const label = document.createElement('strong');
+      label.className = 'tts-response-label';
+      label.textContent = `語音回覆｜${language.label}`;
+      const audio = document.createElement('audio');
+      audio.controls = true;
+      audio.preload = 'metadata';
+      audio.src = audioUrl;
+      loading.className = 'message assistant tts-response';
+      loading.removeAttribute('role');
+      loading.replaceChildren(label, audio);
+      ttsCache.set(cacheKey, { url: audioUrl, article: loading });
+    } catch (error) {
+      loading.classList.remove('loading');
+      loading.classList.add('error');
+      loading.replaceChildren(document.createTextNode(error.message || '語音合成失敗'));
+    } finally {
+      setBusy(false);
+      question.focus();
+    }
+  });
+
+  controls.append(languageLabel, voiceDetails, playButton);
+  actions.appendChild(controls);
+  controls.querySelectorAll('select, button').forEach(control => {
+    control.disabled = isBusy;
+  });
+}
+
 function appendAnswer(item, beforeNode = null) {
   const article = appendMessage(
     'assistant', item.answer, item.citations || [],
@@ -201,6 +344,7 @@ function appendAnswer(item, beforeNode = null) {
     });
   });
   actions.append(copyButton, likeButton, dislikeButton);
+  appendTtsActions(article, item, actions);
   article.appendChild(actions);
   updateFeedbackButtons(actions, item.feedback || 0);
   return article;
@@ -492,6 +636,7 @@ document.querySelector('#clear').addEventListener('click', async () => {
   const payload = await response.json();
   chatToken = payload.chat_token;
   sessionStorage.setItem(chatTokenStorageKey, chatToken);
+  clearTtsCache();
   messages.replaceChildren();
   activeLoadingMessage = null;
   completedQaCount = 0;
@@ -538,6 +683,7 @@ document.querySelector('#end-chat').addEventListener('click', async () => {
     setBusy(false);
     return;
   }
+  clearTtsCache();
   sessionStorage.removeItem(chatTokenStorageKey);
   chatToken = null;
   window.close();
@@ -559,5 +705,6 @@ async function bootstrap() {
 }
 
 bootstrap().catch(error => setStatus(error.message));
+window.addEventListener('beforeunload', clearTtsCache);
 updateSendState();
 updateReportState();
