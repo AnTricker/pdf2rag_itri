@@ -204,13 +204,11 @@ function appendTtsActions(article, item, actions) {
   });
   languageLabel.appendChild(languageSelect);
 
-  const voiceDetails = document.createElement('details');
-  voiceDetails.className = 'tts-voice-options';
-  const voiceSummary = document.createElement('summary');
-  voiceSummary.textContent = '進階聲音';
+  const voiceLabel = document.createElement('label');
+  voiceLabel.textContent = '聲音';
   const voiceSelect = document.createElement('select');
   voiceSelect.setAttribute('aria-label', '語音聲音');
-  voiceDetails.append(voiceSummary, voiceSelect);
+  voiceLabel.appendChild(voiceSelect);
 
   const updateVoices = () => {
     const language = ttsLanguages.get(languageSelect.value);
@@ -222,25 +220,24 @@ function appendTtsActions(article, item, actions) {
       option.selected = voice.value === language.default_voice;
       voiceSelect.appendChild(option);
     });
-    voiceDetails.hidden = language.voices.length === 0;
-    if (voiceDetails.hidden) voiceDetails.open = false;
   };
   languageSelect.addEventListener('change', updateVoices);
   updateVoices();
 
   const playButton = document.createElement('button');
   playButton.type = 'button';
-  playButton.textContent = '🔊 播放';
+  playButton.textContent = '生成語音';
   playButton.addEventListener('click', async () => {
     if (isBusy) return;
     const language = ttsLanguages.get(languageSelect.value);
     const voice = language.voices.length ? voiceSelect.value : language.default_voice;
+    const voiceText = voiceSelect.selectedOptions[0]?.textContent || voice;
     const cacheKey = `${item.qa_id}:${language.value}:${voice}`;
     const existing = ttsCache.get(cacheKey);
     if (existing) {
       playButton.textContent = '已生成';
       existing.article.scrollIntoView({ behavior: 'smooth', block: 'end' });
-      setTimeout(() => { playButton.textContent = '🔊 播放'; }, 1200);
+      setTimeout(() => { playButton.textContent = '生成語音'; }, 1200);
       return;
     }
 
@@ -264,7 +261,7 @@ function appendTtsActions(article, item, actions) {
       const audioUrl = URL.createObjectURL(await response.blob());
       const label = document.createElement('strong');
       label.className = 'tts-response-label';
-      label.textContent = `語音回覆｜${language.label}`;
+      label.textContent = `ATEN優聲學 | ${language.label} | ${voiceText}`;
       const audio = document.createElement('audio');
       audio.controls = true;
       audio.preload = 'metadata';
@@ -283,7 +280,7 @@ function appendTtsActions(article, item, actions) {
     }
   });
 
-  controls.append(languageLabel, voiceDetails, playButton);
+  controls.append(languageLabel, voiceLabel, playButton);
   actions.appendChild(controls);
   controls.querySelectorAll('select, button').forEach(control => {
     control.disabled = isBusy;
