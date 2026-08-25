@@ -44,28 +44,34 @@ TTS_OPTIONS = {
     'default_language': 'TL',
     'languages': [
         {
-            'value': 'TW', 'label': '中文', 'default_voice': 'Rena',
+            'value': 'TW', 'label': '中文', 'default_voice': 'Alan_colloquial',
             'voices': [
-                {'value': 'Rena', 'label': '中文女音 — Rena'},
-                {'value': 'Celia_telemarketing', 'label': '中文女音（行銷）— Celia_telemarketing'},
-                {'value': 'Jason', 'label': '中文男音 — Jason'},
+                {'value': 'Alan_colloquial', 'label': '穩健男聲－展仁 — Alan_colloquial'},
+                {'value': 'Hannah_colloquial', 'label': '自在女聲－思涵 — Hannah_colloquial'},
             ],
         },
         {
             'value': 'EN', 'label': '英文', 'default_voice': 'Raina_narrative',
-            'voices': [],
+            'voices': [
+                {'value': 'Easton_news', 'label': '台語男聲－文雄 — Easton_news'},
+                {'value': 'Raina_narrative', 'label': '台語女聲－思羽 — Raina_narrative'},
+                {'value': 'Alan_colloquial', 'label': '穩健男聲－展仁 — Alan_colloquial'},
+                {'value': 'Hannah_colloquial', 'label': '自在女聲－思涵 — Hannah_colloquial'},
+            ],
         },
         {
             'value': 'TL', 'label': '中文文字轉台語發音', 'default_voice': 'Easton_news',
             'voices': [
-                {'value': 'Easton_news', 'label': '台語男音（新聞）— Easton_news'},
-                {'value': 'Raina_narrative', 'label': '台語女音（敘事）— Raina_narrative'},
-                {'value': 'Celia_call_center_taigi', 'label': '台語女音（客服）— Celia_call_center_taigi'},
+                {'value': 'Easton_news', 'label': '台語男聲－文雄 — Easton_news'},
+                {'value': 'Raina_narrative', 'label': '台語女聲－思羽 — Raina_narrative'},
             ],
         },
         {
             'value': 'TB', 'label': '台語（台羅）', 'default_voice': 'Raina_narrative',
-            'voices': [],
+            'voices': [
+                {'value': 'Easton_news', 'label': '台語男聲－文雄 — Easton_news'},
+                {'value': 'Raina_narrative', 'label': '台語女聲－思羽 — Raina_narrative'},
+            ],
         },
     ],
 }
@@ -346,9 +352,12 @@ def create_app(*, config, embedding_backend, chat_backend,
         allowed_voices = {item['value'] for item in language['voices']}
         requested_voice = payload.get('voice')
         if allowed_voices:
-            if requested_voice not in allowed_voices:
+            if requested_voice is None:
+                voice = language['default_voice']
+            elif requested_voice not in allowed_voices:
                 return jsonify(error_code='invalid_tts_voice', message='不支援的聲音選項'), 400
-            voice = requested_voice
+            else:
+                voice = requested_voice
         else:
             voice = language['default_voice']
 

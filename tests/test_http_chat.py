@@ -219,8 +219,14 @@ class HttpChatTests(unittest.TestCase):
         self.assertEqual(response.headers['Cache-Control'], 'no-store')
         self.assertEqual(self.tts_client.calls[-1]['voice'], 'Easton_news')
 
+        chinese = self.client.post('/api/tts', json={
+            'text': '測試', 'lang_type': 'TW', 'voice': 'Alan_colloquial',
+        }, headers=self._headers(self.chat_token))
+        self.assertEqual(chinese.status_code, 200)
+        self.assertEqual(self.tts_client.calls[-1]['voice'], 'Alan_colloquial')
+
         invalid = self.client.post('/api/tts', json={
-            'text': '測試', 'lang_type': 'TW', 'voice': 'Easton_news',
+            'text': '測試', 'lang_type': 'TW', 'voice': 'Rena',
         }, headers=self._headers(self.chat_token))
         self.assertEqual(invalid.status_code, 400)
         self.assertEqual(invalid.get_json()['error_code'], 'invalid_tts_voice')

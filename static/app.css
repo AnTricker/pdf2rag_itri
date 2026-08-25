@@ -37,12 +37,14 @@ button:disabled { cursor: not-allowed; opacity: .45; box-shadow: none; }
 .tts-actions select { max-width: 260px; border: 1px solid #c2d0d9; border-radius: 8px; padding: 5px 7px; color: #314651; background: white; font: inherit; font-size: .8rem; }
 .tts-actions select:disabled { cursor: not-allowed; opacity: .55; }
 .tts-voice-options { color: #526572; font-size: .8rem; }
-.tts-voice-options summary { cursor: pointer; font-weight: 700; }
+.tts-voice-options summary { display: flex; gap: 5px; align-items: center; cursor: pointer; list-style: none; font-weight: 700; }
+.tts-voice-options summary::-webkit-details-marker { display: none; }
+.tts-voice-options summary::before { content: '▾'; font-size: .82rem; }
 .tts-voice-options[open] { flex-basis: 100%; }
 .tts-voice-options[open] select { display: block; margin-top: 6px; }
-.tts-response { display: grid; gap: 8px; }
+.message.tts-response { display: grid; width: min(560px, 100%); max-width: min(560px, 100%); gap: 8px; }
 .tts-response-label { color: #435a68; font-size: .85rem; }
-.tts-response audio { display: block; width: min(420px, 100%); }
+.tts-response audio { display: block; width: 100%; min-width: 0; }
 .message.loading { display: flex; align-items: center; gap: 11px; color: #365365; background: #f5f9fb; }
 .message.error { color: #812d24; background: #fff1ef; border-color: #f3cbc5; }
 .loading-dots { display: inline-flex; gap: 4px; flex: 0 0 auto; }
