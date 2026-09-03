@@ -37,6 +37,13 @@ reference DEMO 老人六力衛教 chatbot : http://104.43.109.53:8060/chat
 > Develop Rule👨‍💻: 先在 **開發端💻** 試架pipeline到確定"裝環境+模型設定即可開跑"，再轉移到 **算力端🖥️**跑大模型、大量實驗
 
 ---
+### 825
+- add TTS service 
+
+### 824
+- fix: set LLM lazy loading; instead, warm up until calling & rest after 15 mins
+- connect AMD9700 with 5070, set up 'AETN' TTS service to be reachable
+
 ### 820
 - sync IP-log to AMD9700
 - set AMD9700 constant service

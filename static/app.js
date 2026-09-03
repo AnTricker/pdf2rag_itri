@@ -261,7 +261,7 @@ function appendTtsActions(article, item, actions) {
       const audioUrl = URL.createObjectURL(await response.blob());
       const label = document.createElement('strong');
       label.className = 'tts-response-label';
-      label.textContent = `ATEN優聲學 | ${language.label} | ${voiceText}`;
+      label.textContent = `${language.label} | ${voiceText}`;
       const audio = document.createElement('audio');
       audio.controls = true;
       audio.preload = 'metadata';
