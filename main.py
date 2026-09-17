@@ -17,6 +17,7 @@ from local_rag.adapters import (
 from local_rag.application import ImageReviewIncompleteError, PdfRagApplication
 from local_rag.config import AppConfig
 from local_rag.doctor import run_doctor
+from local_rag.q3_importer import Q3Importer
 from local_rag.serve_web import create_app
 
 
@@ -107,6 +108,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     build.add_argument("--output", required=True)
     build.add_argument("--review", required=True, type=int)
 
+    qwen_import = subparsers.add_parser("q3Importer")
+    qwen_import.add_argument("--input", required=True, action="append", type=Path)
+    qwen_import.add_argument("--output", required=True)
+    qwen_import.add_argument("--name")
+
     serve = subparsers.add_parser("serve")
     serve.add_argument("--output", required=True)
 
@@ -166,6 +172,15 @@ def main(argv: Optional[list[str]] = None) -> int:
             include_profile=True,
         )
         build_path = app.build(args.output, args.review)
+        print(build_path)
+        return 0
+
+    if args.command == "q3Importer":
+        build_path = Q3Importer(config).import_collections(
+            args.input,
+            output_id=args.output,
+            collection_name=args.name or args.output,
+        )
         print(build_path)
         return 0
 

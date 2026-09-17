@@ -45,6 +45,28 @@ python main.py build --output 2026-08-11_15-30-45-123456 --review 002
 python main.py serve --output 2026-08-12_07-40-43-839095
 ~~~
 
+### q3Importer：匯入既有 Qwen3-VL Knowledge Records
+
+`q3Importer` 接受 embedding worker 的 run 目錄或其中的
+`knowledge_base/`。可重複提供 `--input`，Importer 會驗證來源 checksum、
+排除沒有向量的 `provenance_only` records、合併 text/image vectors，並輸出成
+現行 `serve` 可載入的不可覆寫 build。所有來源必須使用相同 embedding model、
+dimension 與 normalization 設定。
+
+~~~bash
+python main.py q3Importer \
+  --input runtime/09171518_qwen3vl \
+  --input runtime/09171529_qwen3vl \
+  --output qwen3vl_combined \
+  --name "ITRI Qwen3-VL Knowledge Collection"
+
+python main.py serve --output qwen3vl_combined
+~~~
+
+Importer 只轉換既有 records/vectors，不會載入 embedding model 或呼叫 Ollama。
+Serve 時 `LOCAL_RAG_EMBEDDING_MODEL` 必須指向與來源 manifest 相同的
+Qwen3-VL embedding model，否則 query vector 無法與匯入向量正確比較。
+
 text、image、multi mode 分別控制 Stage 1 的文字與圖片支線。Stage 1/2 永遠不更新正式 RAG；只有 build 會在 output 內建立版本化索引。人工只修改 pending/NNN_records.pretty.json 中標示為 editable 的欄位，不直接修改 JSONL。
 
 ### 人工審閱流程
