@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 import shutil
 from typing import Any
+import warnings
 
 import numpy as np
 
@@ -68,6 +69,11 @@ class Q3Importer:
         preprocessing_sha256 = self._shared_preprocessing(loaded)
         document_id = self._collection_id(loaded)
         profile_override = self._profile_override(profile_path)
+        source_warnings = [
+            message
+            for source in loaded
+            for message in source["warnings"]
+        ]
 
         output_root.mkdir(parents=True)
         try:
@@ -196,9 +202,14 @@ class Q3Importer:
                 image_chunk_count=image_count,
                 provenance_only_count=ignored_count,
                 embedded_count=len(records),
-                warnings=[f"ignored {ignored_count} provenance-only records"],
+                warnings=[
+                    *source_warnings,
+                    f"ignored {ignored_count} provenance-only records",
+                ],
                 stage_statuses={
-                    "source_checksum_validation": "complete",
+                    "source_checksum_validation": (
+                        "complete_with_warnings" if source_warnings else "complete"
+                    ),
                     "source_compatibility_validation": "complete",
                     "record_conversion": "complete",
                     "vector_import": "complete",
@@ -241,9 +252,16 @@ class Q3Importer:
         manifest = self._mapping(
             json.loads(manifest_path.read_text(encoding="utf-8")), "manifest"
         )
-        if manifest.get("schema_version") != "1.0" or manifest.get("mode") != "qwen3vl":
-            raise ValueError(f"unsupported Qwen3-VL manifest: {manifest_path}")
-        checksummed_files = self._verify_source_files(root, manifest)
+        schema_version = str(manifest.get("schema_version", "")).strip()
+        mode = str(manifest.get("mode", "")).strip().lower()
+        if schema_version != "1.0" or mode != "qwen3vl":
+            raise ValueError(
+                "unsupported Qwen3-VL manifest values at "
+                f"{manifest_path}: expected schema_version='1.0' and mode='qwen3vl', "
+                f"found schema_version={manifest.get('schema_version')!r}, "
+                f"mode={manifest.get('mode')!r}"
+            )
+        checksummed_files, checksum_warnings = self._verify_source_files(root, manifest)
         required_checksums = {
             "records.jsonl",
             "vectors/text.npy",
@@ -282,7 +300,10 @@ class Q3Importer:
                 )
         self._validate_source_alignment(root, manifest, records, matrices)
         image_catalog = self._image_catalog(
-            root, len(matrices["image_vector"]), checksummed_files
+            root,
+            len(matrices["image_vector"]),
+            checksummed_files,
+            checksum_warnings,
         )
         return {
             "root": root,
@@ -292,6 +313,7 @@ class Q3Importer:
             "matrices": matrices,
             "records": records,
             "image_catalog": image_catalog,
+            "warnings": checksum_warnings,
         }
 
     def _image_catalog(
@@ -299,6 +321,7 @@ class Q3Importer:
         root: Path,
         image_count: int,
         checksummed_files: set[str],
+        source_warnings: list[str],
     ) -> dict[str, dict[str, Any]]:
         if image_count == 0:
             return {}
@@ -308,7 +331,9 @@ class Q3Importer:
                 f"official Qwen3-VL image metadata is required: {metadata_path}"
             )
         if "embedding_inputs/metadata.json" not in checksummed_files:
-            raise ValueError("embedding input metadata is not covered by manifest checksum")
+            message = "embedding input metadata is not covered by manifest checksum"
+            source_warnings.append(message)
+            warnings.warn(message, RuntimeWarning)
         metadata = self._mapping(
             json.loads(metadata_path.read_text(encoding="utf-8")),
             "embedding input metadata",
@@ -345,11 +370,10 @@ class Q3Importer:
                 overview_path = f"embedding_inputs/{source_image_id}-overview.png"
             if not isinstance(overview_path, str):
                 raise ValueError(f"overview is missing for image {source_image_id}")
-            self._contained_file(root, overview_path)
             if overview_path not in checksummed_files:
-                raise ValueError(
-                    f"overview is not covered by manifest checksum: {overview_path}"
-                )
+                message = f"overview is not covered by manifest checksum: {overview_path}"
+                source_warnings.append(message)
+                warnings.warn(message, RuntimeWarning)
             item["_source_crop_path"] = crop_path
             catalog[source_image_id] = item
         if len(catalog) != image_count:
@@ -467,15 +491,41 @@ class Q3Importer:
 
     def _verify_source_files(
         self, root: Path, manifest: dict[str, Any]
-    ) -> set[str]:
+    ) -> tuple[set[str], list[str]]:
         files = self._mapping(manifest.get("files"), "manifest files")
+        checksum_warnings: list[str] = []
         for relative, expected in files.items():
             if not isinstance(relative, str) or not isinstance(expected, str):
                 raise ValueError("manifest file checksums must be strings")
-            path = self._contained_file(root, relative)
-            if not hmac.compare_digest(self._sha256(path), expected.lower()):
-                raise ValueError(f"source checksum mismatch: {relative}")
-        return set(files)
+            critical = (
+                relative in {
+                    "records.jsonl",
+                    "vectors/text.npy",
+                    "vectors/image.npy",
+                }
+                or Path(relative).parts[:1] == ("crops",)
+            )
+            try:
+                path = self._contained_file(root, relative)
+            except ValueError:
+                if critical:
+                    raise
+                message = f"non-index source artifact is missing: {relative}"
+                checksum_warnings.append(message)
+                warnings.warn(message, RuntimeWarning)
+                continue
+            actual = self._sha256(path)
+            if hmac.compare_digest(actual, expected.lower()):
+                continue
+            message = (
+                f"source checksum mismatch for {relative}: "
+                f"manifest={expected.lower()}, actual={actual}"
+            )
+            if critical:
+                raise ValueError(message)
+            checksum_warnings.append(message)
+            warnings.warn(message, RuntimeWarning)
+        return set(files), checksum_warnings
 
     @staticmethod
     def _preprocessing(root: Path, manifest: dict[str, Any]) -> Any:

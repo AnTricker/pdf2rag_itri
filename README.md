@@ -51,8 +51,11 @@ python main.py serve --output 2026-08-12_07-40-43-839095
 run 目錄或其中的 `knowledge_base/`；可重複提供 `--input`，將多個知識庫整合成
 一個現行 `serve` 可載入的不可覆寫 build。
 
-Importer 會驗證 manifest artifact checksum、record/vector counts、vector rows、
-model/revision/dimension/normalization 與 preprocessing。沒有向量的
+Importer 會強制驗證會影響搜尋正確性的 records、vectors 與代表 crop checksum，
+並檢查 record/vector counts、vector rows、model/revision/dimension/normalization
+與 preprocessing。`embedding_inputs/metadata.json` 和 overview 若 checksum 過期會
+輸出 warning 並記入 `build_report.json`，但只要 metadata 的 image ID、vector row 與
+crop reference 仍一致，就不阻擋 import。沒有向量的
 `provenance_only` records 只列入報告，不進搜尋索引。Image record 必須透過
 `source_image_id` 與 `embedding_inputs/metadata.json` 指向代表 crop；不支援舊版
 直接使用 `metadata.crop` 的格式。
@@ -94,8 +97,34 @@ record ID、KB ID、image ID、region IDs、source indexes 與 content types 會
 引用追蹤。
 `--output` 若已存在會直接拒絕；來源或 profile 改變時請使用新的 output ID。
 
-部署主機的 `.env` 必須指向與來源 manifest 相同的 Qwen3-VL model。CUDA 與
-ROCm PyTorch 都使用 `cuda` device 名稱：
+#### 部署機安裝 Qwen3-VL query model
+
+Importer 只合併預先算好的 vectors，本身不需要載入模型；`serve` 才需要同一個
+Qwen3-VL embedding model 產生 query vector。本專案使用本機離線載入，因此請先在
+可連網的部署機下載完整模型：
+
+~~~bash
+conda activate pdf2rag-amd
+python -m pip install -r requirements.txt
+
+mkdir -p models
+hf download Qwen/Qwen3-VL-Embedding-8B \
+  --local-dir models/Qwen3-VL-Embedding-8B
+
+# 確認至少存在模型設定；這一步不會載入模型。
+test -f models/Qwen3-VL-Embedding-8B/config.json
+~~~
+
+模型來源為 [Qwen/Qwen3-VL-Embedding-8B](https://huggingface.co/Qwen/Qwen3-VL-Embedding-8B)，
+下載方式可參考 [Hugging Face CLI 文件](https://huggingface.co/docs/huggingface_hub/guides/download#download-from-the-cli)。
+若 `hf` 指令不存在，先執行：
+
+~~~bash
+python -m pip install --upgrade huggingface_hub
+~~~
+
+接著把 `.env` 的 model path 設為下載目錄的絕對路徑。CUDA 與 ROCm PyTorch 都使用
+`cuda` device 名稱：
 
 ~~~dotenv
 LOCAL_RAG_EMBEDDING_MODEL=/absolute/path/to/Qwen3-VL-Embedding-8B
@@ -108,6 +137,14 @@ LOCAL_RAG_LLM_URL=http://localhost:11434
 LOCAL_RAG_LLM_MODEL=<Ollama回答模型>
 LOCAL_RAG_SESSION_SECRET=<隨機長字串>
 LOCAL_RAG_ADMIN_PASSWORD=<管理密碼>
+~~~
+
+若主機上已經有完整的同一模型，不必重複下載，直接填該模型目錄的絕對路徑即可。
+
+例如 repository 位於 `/home/r300_465035/文件/pdf2rag_itri`，則 model path 應為：
+
+~~~dotenv
+LOCAL_RAG_EMBEDDING_MODEL=/home/r300_465035/文件/pdf2rag_itri/models/Qwen3-VL-Embedding-8B
 ~~~
 
 確認 Ollama 已在部署主機啟動後：
