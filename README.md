@@ -141,6 +141,38 @@ LOCAL_RAG_ADMIN_PASSWORD=<管理密碼>
 
 若主機上已經有完整的同一模型，不必重複下載，直接填該模型目錄的絕對路徑即可。
 
+#### 32GB 單一內顯／UMA 記憶體注意事項
+
+本 serve 會讓 SentenceTransformer 的 Qwen3-VL embedding model 常駐，Ollama 在
+回答期間也會載入 Gemma。若 Gemma 實測約 18GB、Qwen 約 10GB 以上，兩者權重就已
+接近 28–30GB；再加上 KV cache、activations、ROCm allocator 與系統共用記憶體，
+32GB 單一 memory pool 高機率 OOM。
+
+優先方案：
+
+1. 若系統 RAM 足夠，將 query embedding 放在 CPU，避免占用 GPU/UMA 顯存：
+
+   ~~~dotenv
+   LOCAL_RAG_EMBEDDING_DEVICE=cpu
+   LOCAL_RAG_EMBEDDING_DTYPE=auto
+   LOCAL_RAG_EMBEDDING_BATCH_SIZE=1
+   ~~~
+
+   Query embedding 會變慢，但每次只處理少量 query，通常比兩個大型模型同駐安全。
+
+2. 若有第二張 GPU，將 Qwen 指定到另一裝置，例如 `cuda:1`。
+
+3. 必須共用 32GB GPU 時，降低 Gemma context，並同步讓 input budget 小於 context：
+
+   ~~~dotenv
+   LOCAL_RAG_LLM_CONTEXT_TOKENS=8192
+   LOCAL_RAG_ANSWER_INPUT_BUDGET_TOKENS=6144
+   ~~~
+
+   這只能降低 KV cache，無法消除兩套模型權重同時存在的峰值；若仍 OOM，應改用
+   CPU query embedding、較小的回答模型或增加可用記憶體。可用 `ollama ps` 查看
+   Gemma 的 `PROCESSOR` 與實際 context/offload 狀態。
+
 例如 repository 位於 `/home/r300_465035/文件/pdf2rag_itri`，則 model path 應為：
 
 ~~~dotenv

@@ -78,7 +78,10 @@ class SentenceTransformerEmbeddingBackend:
         self.tokenizer = self.model.tokenizer
         model_limit = int(getattr(self.model, "max_seq_length", 512))
         self.max_input_tokens = max(1, model_limit - reserved_tokens)
-        self.dimension = int(self.model.get_sentence_embedding_dimension())
+        get_dimension = getattr(self.model, "get_embedding_dimension", None)
+        if get_dimension is None:
+            get_dimension = self.model.get_sentence_embedding_dimension
+        self.dimension = int(get_dimension())
 
     def count(self, text: str) -> int:
         return len(

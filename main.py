@@ -192,6 +192,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.command == "serve":
         if not config.session_secret:
             raise ValueError("LOCAL_RAG_SESSION_SECRET is required for serve")
+        output_root = PdfRagApplication.resolve_configured_output(
+            config.index_root, args.output
+        )
+        build_root = PdfRagApplication.latest_build(output_root)
         embedding = embedding_backend(config)
         chat = OllamaChatBackend(
             config,
@@ -201,13 +205,6 @@ def main(argv: Optional[list[str]] = None) -> int:
             evidence_draft_prompt=read_prompt("evidence_draft_v1.txt"),
             final_answer_prompt=read_prompt("grounded_answer_v1.txt"),
         )
-        resolver = PdfRagApplication(
-            config=config,
-            text_extractor=PypdfTextExtractor(),
-            embedding_backend=embedding,
-        )
-        output_root = resolver.resolve_output(args.output)
-        build_root = resolver.latest_build(output_root)
         app = None
         try:
             app = create_app(
