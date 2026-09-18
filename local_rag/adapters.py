@@ -48,13 +48,32 @@ class PypdfTextExtractor:
 class SentenceTransformerEmbeddingBackend:
     name = "sentence_transformers_local"
 
-    def __init__(self, model_path: str, *, batch_size: int = 16, reserved_tokens: int = 8) -> None:
+    def __init__(
+        self,
+        model_path: str,
+        *,
+        batch_size: int = 16,
+        reserved_tokens: int = 8,
+        device: str = "",
+        dtype: str = "",
+        attention: str = "",
+    ) -> None:
         if not model_path:
             raise ValueError("LOCAL_RAG_EMBEDDING_MODEL is required")
         from sentence_transformers import SentenceTransformer
 
         self.model_name = model_path
-        self.model = SentenceTransformer(model_path, local_files_only=True)
+        model_kwargs = {}
+        if dtype:
+            model_kwargs["torch_dtype"] = dtype
+        if attention:
+            model_kwargs["attn_implementation"] = attention
+        self.model = SentenceTransformer(
+            model_path,
+            device=device or None,
+            model_kwargs=model_kwargs or None,
+            local_files_only=True,
+        )
         self.batch_size = batch_size
         self.tokenizer = self.model.tokenizer
         model_limit = int(getattr(self.model, "max_seq_length", 512))

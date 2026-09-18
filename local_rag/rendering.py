@@ -15,7 +15,7 @@ class SafeMarkdownRenderer:
 
         rendered = markdown.markdown(
             text,
-            extensions=["fenced_code", "sane_lists"],
+            extensions=["fenced_code", "sane_lists", "tables"],
             output_format="html",
         )
         return bleach.clean(
@@ -35,6 +35,12 @@ class SafeMarkdownRenderer:
                 "pre",
                 "code",
                 "a",
+                "table",
+                "thead",
+                "tbody",
+                "tr",
+                "th",
+                "td",
             },
             attributes={"a": ["href", "title"]},
             protocols={"http", "https"},

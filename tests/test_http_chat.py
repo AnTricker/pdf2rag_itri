@@ -101,12 +101,17 @@ class MultiChatBackend(FakeChatBackend):
 class FakeIndex:
     def __init__(self, root):
         source = SimpleNamespace(document_name='manual.pdf', page_start=4,
-                                 page_end=4, artifact_path=None)
+                                 page_end=4, artifact_path=None,
+                                 section_path=['Reset'], content_types=['text'],
+                                 source_kb_id='kb-fixture',
+                                 source_record_id='source-record-1',
+                                 source_image_id='source-image-1')
         record = SimpleNamespace(record_id='record-1', modality='text',
                                  content='按住 RESET 三秒。', source=source)
         self.hit = SimpleNamespace(record=record, score=0.9)
         self.records = [record]
         self.output_root = root
+        self.manifest = SimpleNamespace(vector_dimension=2)
         self.corpus_profile = CorpusProfile(
             document_type='manual', summary='設備手冊',
             in_scope_topics=['重設'], document_id='doc-1',
@@ -182,6 +187,21 @@ class HttpChatTests(unittest.TestCase):
             '/api/chat/jobs', data=data,
             headers=self._headers(token or self.chat_token),
         )
+
+    def test_create_app_rejects_query_embedding_dimension_mismatch(self):
+        root = Path(self.temp_dir.name)
+        incompatible = SimpleNamespace(dimension=3)
+        with patch(
+            'local_rag.serve_web.FileVectorIndex.load', return_value=FakeIndex(root)
+        ):
+            with self.assertRaisesRegex(ValueError, 'dimension'):
+                create_app(
+                    config=self.config,
+                    embedding_backend=incompatible,
+                    chat_backend=self.backend,
+                    build_root=root / 'build',
+                    output_root=root,
+                )
 
     def test_single_question_uses_one_plan_and_one_answer_call(self):
         response = self._post_job({'question': '如何重設？'})
@@ -410,6 +430,10 @@ class HttpChatTests(unittest.TestCase):
         self.assertIn('report_version: 1', text)
         self.assertIn('## 對話 1', text)
         self.assertIn('manual.pdf，第 4 頁', text)
+        self.assertIn('章節：Reset', text)
+        self.assertIn('KB：kb-fixture', text)
+        self.assertIn('Record：source-record-1', text)
+        self.assertIn('Image：source-image-1', text)
         self.assertFalse(list(self.config.session_log_root.glob('*.md')))
 
     def test_end_session_keeps_access_cookie_and_finishes_chat_log(self):

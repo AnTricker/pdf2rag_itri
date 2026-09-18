@@ -19,6 +19,12 @@ class SourceMetadata(BaseModel):
     bbox_normalized: Optional[tuple[float, float, float, float]] = None
     artifact_path: Optional[str] = None
     section_path: list[str] = Field(default_factory=list)
+    source_record_id: Optional[str] = None
+    source_kb_id: Optional[str] = None
+    source_image_id: Optional[str] = None
+    region_ids: list[str] = Field(default_factory=list)
+    source_indexes: list[str] = Field(default_factory=list)
+    content_types: list[str] = Field(default_factory=list)
 
 
 class ProcessingMetadata(BaseModel):
@@ -355,6 +361,10 @@ class QAHistoryPair(BaseModel):
 class EmbeddingMetadata(BaseModel):
     backend: str
     model: str
+    provider: Optional[str] = None
+    revision: Optional[str] = None
+    normalized: Optional[bool] = None
+    preprocessing_sha256: Optional[str] = None
 
 
 class SnapshotManifest(BaseModel):
@@ -385,6 +395,7 @@ class BuildReport(BaseModel):
     image_chunk_count: int = Field(default=0, ge=0)
     excluded_unusable_count: int = Field(default=0, ge=0)
     excluded_incomplete_count: int = Field(default=0, ge=0)
+    provenance_only_count: int = Field(default=0, ge=0)
     embedded_count: int = Field(ge=0)
     warnings: list[str] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)

@@ -33,6 +33,9 @@ def embedding_backend(config: AppConfig) -> SentenceTransformerEmbeddingBackend:
         config.embedding_model,
         batch_size=config.embedding_batch_size,
         reserved_tokens=config.embedding_reserved_tokens,
+        device=config.embedding_device,
+        dtype=config.embedding_dtype,
+        attention=config.embedding_attention,
     )
 
 
@@ -112,6 +115,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     qwen_import.add_argument("--input", required=True, action="append", type=Path)
     qwen_import.add_argument("--output", required=True)
     qwen_import.add_argument("--name")
+    qwen_import.add_argument("--profile", type=Path)
 
     serve = subparsers.add_parser("serve")
     serve.add_argument("--output", required=True)
@@ -180,6 +184,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             args.input,
             output_id=args.output,
             collection_name=args.name or args.output,
+            profile_path=args.profile,
         )
         print(build_path)
         return 0

@@ -47,25 +47,94 @@ python main.py serve --output 2026-08-12_07-40-43-839095
 
 ### q3Importer：匯入既有 Qwen3-VL Knowledge Records
 
-`q3Importer` 接受 embedding worker 的 run 目錄或其中的
-`knowledge_base/`。可重複提供 `--input`，Importer 會驗證來源 checksum、
-排除沒有向量的 `provenance_only` records、合併 text/image vectors，並輸出成
-現行 `serve` 可載入的不可覆寫 build。所有來源必須使用相同 embedding model、
-dimension 與 normalization 設定。
+`q3Importer` 只接受正式 Qwen3-VL schema 1.0。輸入可為 embedding worker 的
+run 目錄或其中的 `knowledge_base/`；可重複提供 `--input`，將多個知識庫整合成
+一個現行 `serve` 可載入的不可覆寫 build。
+
+Importer 會驗證 manifest artifact checksum、record/vector counts、vector rows、
+model/revision/dimension/normalization 與 preprocessing。沒有向量的
+`provenance_only` records 只列入報告，不進搜尋索引。Image record 必須透過
+`source_image_id` 與 `embedding_inputs/metadata.json` 指向代表 crop；不支援舊版
+直接使用 `metadata.crop` 的格式。
+
+若直接指定 `knowledge_base/`，仍須保留同一 run 上層的 `resolved_config.json`；
+除非 manifest 本身已包含 `preprocessing`。含圖片的來源也必須完整保留
+`crops/` 與 `embedding_inputs/`，其 metadata、crop、overview 都要有 manifest checksum。
 
 ~~~bash
 python main.py q3Importer \
-  --input runtime/09171518_qwen3vl \
-  --input runtime/09171529_qwen3vl \
+  --input runtime/A_qwen3vl \
+  --input runtime/B_qwen3vl \
   --output qwen3vl_combined \
-  --name "ITRI Qwen3-VL Knowledge Collection"
+  --name "ITRI Qwen3-VL Knowledge Collection" \
+  --profile config/q3_profile.example.json
 
+# --profile 可省略；省略時依 heading、type 與 record 統計產生 deterministic profile。
+~~~
+
+`--profile` 格式可參考 `config/q3_profile.example.json`，只能覆寫摘要、topics、
+sections 等內容欄位；document ID、name、source 與 schema/version 由 importer 決定。
+
+產物固定為：
+
+~~~text
+runtime/outputs/qwen3vl_combined/
+├─ crops/
+└─ builds/001/
+   ├─ records.jsonl
+   ├─ embeddings.npy
+   ├─ corpus_profile.json
+   ├─ manifest.json
+   └─ build_report.json
+~~~
+
+Importer 沿用來源的預計算 vectors，不載入 embedding model 或呼叫 Ollama。
+輸入 vectors 會依 record 順序合併並轉成 serve 使用的單一 float32 matrix；來源
+record ID、KB ID、image ID、region IDs、source indexes 與 content types 會保留供
+引用追蹤。
+`--output` 若已存在會直接拒絕；來源或 profile 改變時請使用新的 output ID。
+
+部署主機的 `.env` 必須指向與來源 manifest 相同的 Qwen3-VL model。CUDA 與
+ROCm PyTorch 都使用 `cuda` device 名稱：
+
+~~~dotenv
+LOCAL_RAG_EMBEDDING_MODEL=/absolute/path/to/Qwen3-VL-Embedding-8B
+LOCAL_RAG_EMBEDDING_DEVICE=cuda
+LOCAL_RAG_EMBEDDING_DTYPE=float16
+LOCAL_RAG_EMBEDDING_ATTENTION=sdpa
+LOCAL_RAG_EMBEDDING_BATCH_SIZE=1
+
+LOCAL_RAG_LLM_URL=http://localhost:11434
+LOCAL_RAG_LLM_MODEL=<Ollama回答模型>
+LOCAL_RAG_SESSION_SECRET=<隨機長字串>
+LOCAL_RAG_ADMIN_PASSWORD=<管理密碼>
+~~~
+
+確認 Ollama 已在部署主機啟動後：
+
+~~~bash
 python main.py serve --output qwen3vl_combined
 ~~~
 
-Importer 只轉換既有 records/vectors，不會載入 embedding model 或呼叫 Ollama。
-Serve 時 `LOCAL_RAG_EMBEDDING_MODEL` 必須指向與來源 manifest 相同的
-Qwen3-VL embedding model，否則 query vector 無法與匯入向量正確比較。
+瀏覽 `http://127.0.0.1:8000`。若 query model dimension 與 build 不一致，serve
+會在啟動階段明確失敗，不會等到第一次查詢才報錯。
+
+部署機可執行下列驗收；開發 code 機禁止執行：
+
+~~~bash
+python -m unittest \
+  tests.test_q3_importer \
+  tests.test_embedding_runtime \
+  tests.test_rendering \
+  tests.test_http_chat
+
+python main.py q3Importer \
+  --input runtime/<run>_qwen3vl \
+  --output q3_smoke \
+  --name "Q3 Smoke Test"
+
+python main.py serve --output q3_smoke
+~~~
 
 text、image、multi mode 分別控制 Stage 1 的文字與圖片支線。Stage 1/2 永遠不更新正式 RAG；只有 build 會在 output 內建立版本化索引。人工只修改 pending/NNN_records.pretty.json 中標示為 editable 的欄位，不直接修改 JSONL。
 

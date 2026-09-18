@@ -8,3 +8,4 @@ input/
 .pytest_cache/
 AGENTS.md
 TTS/API_TOKEN.txt
+tests/

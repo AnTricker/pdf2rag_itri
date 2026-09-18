@@ -404,13 +404,19 @@ class ServeChatEngine:
             if identity in seen:
                 continue
             seen.add(identity)
+            source = hit.record.source
             citations.append({
                 'source_type': 'document',
                 'record_id': hit.record.record_id,
                 'modality': hit.record.modality,
-                'document_name': hit.record.source.document_name,
-                'page_start': hit.record.source.page_start,
-                'page_end': hit.record.source.page_end,
+                'document_name': source.document_name,
+                'page_start': source.page_start,
+                'page_end': source.page_end,
+                'section_path': list(getattr(source, 'section_path', []) or []),
+                'content_types': list(getattr(source, 'content_types', []) or []),
+                'source_kb_id': getattr(source, 'source_kb_id', None),
+                'source_record_id': getattr(source, 'source_record_id', None),
+                'source_image_id': getattr(source, 'source_image_id', None),
                 'crop_url': f'/api/crops/{hit.record.record_id}' if artifact else None,
                 'score': hit.score,
             })

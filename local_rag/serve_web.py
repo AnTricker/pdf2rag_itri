@@ -97,6 +97,10 @@ def create_app(*, config, embedding_backend, chat_backend,
     admin_signer = URLSafeTimedSerializer(config.session_secret, salt='local-rag-admin-v1')
     monitoring = MonitoringStore(config.monitoring_db_path, config.access_log_root)
     index = FileVectorIndex.load(build_root, output_root=output_root)
+    if embedding_backend.dimension != index.manifest.vector_dimension:
+        raise ValueError(
+            "query embedding dimension does not match the loaded knowledge build"
+        )
     logger = SessionJsonlLogger(config.session_log_root,
                                enabled=config.session_log_enabled)
     sessions = SessionStore(
@@ -693,7 +697,23 @@ def _markdown_report(*, session_id: str, created_at: str, exported_at: str,
                     start = citation.get('page_start')
                     end = citation.get('page_end')
                     pages = f'第 {start} 頁' if start == end else f'第 {start}~{end} 頁'
-                    lines.append(f'  - {citation.get("document_name")}，{pages}')
+                    details = []
+                    section = citation.get('section_path') or []
+                    if section:
+                        details.append(f'章節：{" / ".join(section)}')
+                    types = citation.get('content_types') or []
+                    if types:
+                        details.append(f'類型：{", ".join(types)}')
+                    if citation.get('source_kb_id'):
+                        details.append(f'KB：{citation.get("source_kb_id")}')
+                    if citation.get('source_record_id'):
+                        details.append(f'Record：{citation.get("source_record_id")}')
+                    if citation.get('source_image_id'):
+                        details.append(f'Image：{citation.get("source_image_id")}')
+                    suffix = f'（{"；".join(details)}）' if details else ''
+                    lines.append(
+                        f'  - {citation.get("document_name")}，{pages}{suffix}'
+                    )
         lines.append('')
     return '\n'.join(lines)
 

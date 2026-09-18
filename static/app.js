@@ -116,6 +116,29 @@ function createTtsLoading(sourceArticle, qaId) {
   return article;
 }
 
+function openCitationImage(url, alt) {
+  let dialog = document.querySelector('.citation-lightbox');
+  if (!dialog) {
+    dialog = document.createElement('dialog');
+    dialog.className = 'citation-lightbox';
+    const close = document.createElement('button');
+    close.type = 'button';
+    close.className = 'citation-lightbox-close';
+    close.textContent = '關閉';
+    close.addEventListener('click', () => dialog.close());
+    const image = document.createElement('img');
+    dialog.append(close, image);
+    dialog.addEventListener('click', event => {
+      if (event.target === dialog) dialog.close();
+    });
+    document.body.appendChild(dialog);
+  }
+  const image = dialog.querySelector('img');
+  image.src = url;
+  image.alt = alt;
+  dialog.showModal();
+}
+
 function appendMessage(role, content, citations = [], answerHtml = null, itemQuestion = null, beforeNode = null) {
   const article = document.createElement('article');
   article.className = `message ${role}`;
@@ -133,22 +156,74 @@ function appendMessage(role, content, citations = [], answerHtml = null, itemQue
   if (citations.length) {
     const list = document.createElement('div');
     list.className = 'citations';
+    const title = document.createElement('strong');
+    title.className = 'citations-title';
+    title.textContent = '參考資料';
+    list.appendChild(title);
+    const grid = document.createElement('div');
+    grid.className = 'citation-grid';
     citations.forEach((citation, index) => {
-      const line = document.createElement('div');
+      const card = document.createElement('article');
+      card.className = 'citation-card';
+      const heading = document.createElement('strong');
+      if (citation.source_type === 'attachment') {
+        heading.textContent = `附件｜${citation.name}`;
+        card.appendChild(heading);
+        grid.appendChild(card);
+        return;
+      }
       const pages = citation.page_start === citation.page_end
         ? `第 ${citation.page_start} 頁`
-        : `第 ${citation.page_start}~${citation.page_end} 頁`;
-      line.textContent = citation.source_type === 'attachment'
-        ? `[附件] ${citation.name}`
-        : `[${index + 1}] ${citation.document_name}，${pages}`;
-      list.appendChild(line);
+        : `第 ${citation.page_start}–${citation.page_end} 頁`;
+      heading.textContent = `[${index + 1}] ${citation.document_name}`;
+      const location = document.createElement('div');
+      location.className = 'citation-location';
+      location.textContent = pages;
+      card.append(heading, location);
+      if ((citation.section_path || []).length) {
+        const section = document.createElement('div');
+        section.className = 'citation-section';
+        section.textContent = citation.section_path.join(' / ');
+        card.appendChild(section);
+      }
+      if ((citation.content_types || []).length) {
+        const tags = document.createElement('div');
+        tags.className = 'citation-tags';
+        citation.content_types.forEach(value => {
+          const tag = document.createElement('span');
+          tag.textContent = value;
+          tags.appendChild(tag);
+        });
+        card.appendChild(tags);
+      }
+      const identifiers = [
+        citation.source_kb_id ? `KB ${citation.source_kb_id}` : '',
+        citation.source_record_id ? `Record ${citation.source_record_id}` : '',
+        citation.source_image_id ? `Image ${citation.source_image_id}` : '',
+      ].filter(Boolean);
+      if (identifiers.length) {
+        const source = document.createElement('code');
+        source.className = 'citation-source-id';
+        source.textContent = identifiers.join(' · ');
+        card.appendChild(source);
+      }
       if (citation.crop_url) {
+        const preview = document.createElement('button');
+        preview.type = 'button';
+        preview.className = 'citation-preview';
+        preview.setAttribute('aria-label', `放大引用圖片 ${index + 1}`);
         const image = document.createElement('img');
         image.src = citation.crop_url;
         image.alt = `引用圖片 ${index + 1}`;
-        list.appendChild(image);
+        preview.appendChild(image);
+        preview.addEventListener('click', () => {
+          openCitationImage(citation.crop_url, image.alt);
+        });
+        card.appendChild(preview);
       }
+      grid.appendChild(card);
     });
+    list.appendChild(grid);
     article.appendChild(list);
   }
   messages.insertBefore(article, beforeNode);
