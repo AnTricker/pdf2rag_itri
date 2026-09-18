@@ -47,22 +47,22 @@ python main.py serve --output 2026-08-12_07-40-43-839095
 
 ### q3Importer：匯入既有 Qwen3-VL Knowledge Records
 
-`q3Importer` 只接受正式 Qwen3-VL schema 1.0。輸入可為 embedding worker 的
-run 目錄或其中的 `knowledge_base/`；可重複提供 `--input`，將多個知識庫整合成
-一個現行 `serve` 可載入的不可覆寫 build。
+`q3Importer` 接受具備正式 Qwen3-VL artifacts 的 knowledge base。輸入可為
+embedding worker 的 run 目錄或其中的 `knowledge_base/`；可重複提供 `--input`，
+將多個知識庫整合成一個現行 `serve` 可載入的不可覆寫 build。Importer 不以
+`schema_version` 或 `mode` 標籤阻擋可相容資料。
 
 Importer 會強制驗證會影響搜尋正確性的 records、vectors 與代表 crop checksum，
 並檢查 record/vector counts、vector rows、model/revision/dimension/normalization
-與 preprocessing。`embedding_inputs/metadata.json` 和 overview 若 checksum 過期會
-輸出 warning 並記入 `build_report.json`，但只要 metadata 的 image ID、vector row 與
-crop reference 仍一致，就不阻擋 import。沒有向量的
+與 preprocessing。不參與最終 build 的 metadata／overview checksum 會直接忽略；
+只要 metadata 的 image ID、vector row 與 crop reference 一致即可。沒有向量的
 `provenance_only` records 只列入報告，不進搜尋索引。Image record 必須透過
 `source_image_id` 與 `embedding_inputs/metadata.json` 指向代表 crop；不支援舊版
 直接使用 `metadata.crop` 的格式。
 
 若直接指定 `knowledge_base/`，仍須保留同一 run 上層的 `resolved_config.json`；
-除非 manifest 本身已包含 `preprocessing`。含圖片的來源也必須完整保留
-`crops/` 與 `embedding_inputs/`，其 metadata、crop、overview 都要有 manifest checksum。
+除非 manifest 本身已包含 `preprocessing`。含圖片的來源必須保留 `crops/` 與
+`embedding_inputs/metadata.json`；只有實際匯入的代表 crop 必須有 manifest checksum。
 
 ~~~bash
 python main.py q3Importer \
