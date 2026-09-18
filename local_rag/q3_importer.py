@@ -404,9 +404,7 @@ class Q3Importer:
         if item is None:
             raise ValueError(f"image metadata not found for {source_image_id}")
         metadata_row = self._image_vector_row(item)
-        if metadata_row is None:
-            raise ValueError(f"image vector row is missing for {source_image_id}")
-        if metadata_row != vector_row:
+        if metadata_row is not None and metadata_row != vector_row:
             raise ValueError(f"image vector row mismatch for {source_image_id}")
 
         crop = item["_source_crop_path"]

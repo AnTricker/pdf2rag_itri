@@ -334,6 +334,23 @@ class Q3ImporterTests(unittest.TestCase):
         )
         self.assertEqual(build.name, "001")
 
+    def test_uses_record_vector_row_when_image_metadata_does_not_repeat_it(self) -> None:
+        source = write_q3_run(self.root, "metadata-without-row")
+        kb = source / "knowledge_base"
+        metadata_path = kb / "embedding_inputs" / "metadata.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata["items"][0].pop("image_vector_row")
+        metadata_path.write_text(json.dumps(metadata, ensure_ascii=False), encoding="utf-8")
+        manifest_path = kb / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["files"]["embedding_inputs/metadata.json"] = sha256(metadata_path)
+        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+        build = Q3Importer(self.config).import_collections(
+            [source], output_id="metadata-without-row-output", collection_name="Fixture"
+        )
+        index = FileVectorIndex.load(build, output_root=build.parents[1])
+        self.assertEqual(index.records[1].source.source_image_id, "image-1")
+
     def test_rejects_existing_output(self) -> None:
         source = write_q3_run(self.root, "source-a")
         (self.config.index_root / "combined").mkdir(parents=True)
