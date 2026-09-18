@@ -37,6 +37,13 @@ reference DEMO 老人六力衛教 chatbot : http://104.43.109.53:8060/chat
 > Develop Rule👨‍💻: 先在 **開發端💻** 試架pipeline到確定"裝環境+模型設定即可開跑"，再轉移到 **算力端🖥️**跑大模型、大量實驗
 
 ---
+### 918
+- 新增 `q3Importer`：支援匯入、合併多個 Qwen3-VL knowledge base，輸出單一 immutable serve build
+- 補齊 Qwen3-VL query embedding runtime、模型安裝／環境設定，以及自訂 output ID 的 serve 流程
+- 擴充來源 provenance、citation 資訊與前端 Markdown／圖片引用 lightbox 顯示
+- 放寬非關鍵的來源 schema、mode 與 metadata checksum 限制，保留必要的 vector、record 與 crop 結構驗證
+- 待改善：目前 crop 必須先進入 Top-K 且被回答引用才會顯示，需調整 image retrieval 與 citation 策略
+
 ### 825
 - add TTS service 
 
