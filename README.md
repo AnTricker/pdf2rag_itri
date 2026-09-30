@@ -8,8 +8,7 @@
 
 ```powershell
 conda activate pdf2rag
-cd C:\ITRI\PDF2json\local_rag_mvp
- 
+cd <PATH_TO_PROJECT>
 python -m pip install -r requirements.txt
  
 conda install -c conda-forge poppler
