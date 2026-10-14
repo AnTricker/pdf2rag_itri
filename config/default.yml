@@ -1,0 +1,14 @@
+project:
+  output_root: "output"
+  render_dpi: 150
+  heartbeat_seconds: 30
+
+metadata:
+  sampling_interval_seconds: 1.0
+
+conda:
+  core_env: "digital-pdf-core"
+  surya_env: "digital-pdf-surya"
+
+logging:
+  redact_keys: ["token", "secret", "password", "api_key", "authorization"]

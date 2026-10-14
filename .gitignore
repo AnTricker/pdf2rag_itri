@@ -1,0 +1,50 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+local.env
+config/local.yml
+
+# Runtime data
+/input/
+/output/
+/models/
+*.gguf
+
+# Logs
+*.log
+
+# Python cache and build
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+build/
+dist/
+.eggs/
+*.egg-info/
+.tox/
+.nox/
+
+
+# IDE and operating system
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# agents related
+.agents/
+AGENTS.md
+
+# resources
+/resources/
+
+# 
+/tests/

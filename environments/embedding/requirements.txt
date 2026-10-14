@@ -1,0 +1,5 @@
+beautifulsoup4>=4.12,<5
+numpy>=2,<3
+Pillow>=10,<13
+sentence-transformers[image]>=5,<6
+

@@ -1,0 +1,43 @@
+embedding:
+  mode: qwen3vl
+  environment: digital-pdf-embedding
+  command:
+    - python
+    - -m
+    - digital_pdf_toolkit.embedding_worker
+    - "{input}"
+    - "{output_dir}"
+    - --config-json
+    - "{config_json}"
+  modes:
+    qwen3vl:
+      provider: sentence_transformers
+      model_id: Qwen/Qwen3-VL-Embedding-8B
+      revision: null
+      dimension: 4096
+      runtime:
+        device: cuda
+        dtype: float16
+        attention: sdpa
+        batch_size: 1
+        max_tokens: null
+        normalize_embeddings: true
+
+embedding_preprocess:
+  text_when_nonempty: true
+  image_when_text_empty: true
+  image_preprocess:
+    factor: 32
+    patch_size: 16
+    min_pixels: 4096
+    max_pixels: 1310720
+  persist_headings_across_pages: true
+  aggregate_repeated_regions: true
+  independent_text_types: [table, form]
+  visual_dedup:
+    enabled: true
+    hash_size: 8
+    resize: 32
+    hamming_threshold: 6
+    aspect_ratio_tolerance: 0.05
+    min_distinct_pages: 3
