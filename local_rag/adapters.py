@@ -48,18 +48,40 @@ class PypdfTextExtractor:
 class SentenceTransformerEmbeddingBackend:
     name = "sentence_transformers_local"
 
-    def __init__(self, model_path: str, *, batch_size: int = 16, reserved_tokens: int = 8) -> None:
+    def __init__(
+        self,
+        model_path: str,
+        *,
+        batch_size: int = 16,
+        reserved_tokens: int = 8,
+        device: str = "",
+        dtype: str = "",
+        attention: str = "",
+    ) -> None:
         if not model_path:
             raise ValueError("LOCAL_RAG_EMBEDDING_MODEL is required")
         from sentence_transformers import SentenceTransformer
 
         self.model_name = model_path
-        self.model = SentenceTransformer(model_path, local_files_only=True)
+        model_kwargs = {}
+        if dtype:
+            model_kwargs["torch_dtype"] = dtype
+        if attention:
+            model_kwargs["attn_implementation"] = attention
+        self.model = SentenceTransformer(
+            model_path,
+            device=device or None,
+            model_kwargs=model_kwargs or None,
+            local_files_only=True,
+        )
         self.batch_size = batch_size
         self.tokenizer = self.model.tokenizer
         model_limit = int(getattr(self.model, "max_seq_length", 512))
         self.max_input_tokens = max(1, model_limit - reserved_tokens)
-        self.dimension = int(self.model.get_sentence_embedding_dimension())
+        get_dimension = getattr(self.model, "get_embedding_dimension", None)
+        if get_dimension is None:
+            get_dimension = self.model.get_sentence_embedding_dimension
+        self.dimension = int(get_dimension())
 
     def count(self, text: str) -> int:
         return len(
@@ -82,6 +104,29 @@ class SentenceTransformerEmbeddingBackend:
             show_progress_bar=len(texts) > self.batch_size,
         )
         return np.asarray(vectors, dtype=np.float32)
+
+
+class Q3QueryEmbeddingBackend(SentenceTransformerEmbeddingBackend):
+    """Use the model's trained query encoding path for native Q3 retrieval."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        if not callable(getattr(self.model, "encode_query", None)):
+            raise ValueError("Q3 query model does not support encode_query")
+
+    def embed(self, texts: list[str]) -> np.ndarray:
+        if any(self.count(text) > self.max_input_tokens for text in texts):
+            raise ValueError("embedding input exceeds configured token limit")
+        encode_query = getattr(self.model, "encode_query", None)
+        if not callable(encode_query):
+            raise ValueError("Q3 query model does not support encode_query")
+        vectors = np.asarray(encode_query(
+            texts, batch_size=self.batch_size, convert_to_numpy=True,
+            normalize_embeddings=True, show_progress_bar=False,
+        ), dtype=np.float32)
+        if vectors.shape != (len(texts), self.dimension) or not np.isfinite(vectors).all():
+            raise ValueError("Invalid Q3 query embeddings")
+        return vectors
 
 
 class UltralyticsImagePipeline:

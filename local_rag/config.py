@@ -26,6 +26,7 @@ def _boolean(value: str) -> bool:
 class AppConfig:
     base_dir: Path
     index_root: Path
+    q3_root: Optional[Path] = None
     ingest_mode: str = "multi"
     profile_max_records: int = 40
     input_pdf: Optional[Path] = None
@@ -46,6 +47,9 @@ class AppConfig:
     embedding_backend: str = "sentence_transformers_local"
     embedding_batch_size: int = 16
     embedding_reserved_tokens: int = 8
+    embedding_device: str = ""
+    embedding_dtype: str = ""
+    embedding_attention: str = ""
     retrieval_top_k: int = 5
     retrieval_min_score: float = 0.30
     retrieval_context_max_records: int = 8
@@ -103,6 +107,7 @@ class AppConfig:
             upload_max_pixels=int(get('LOCAL_RAG_UPLOAD_MAX_PIXELS', '20000000')),
             base_dir=base,
             index_root=_relative_path(base, get("LOCAL_RAG_INDEX_ROOT", "runtime/outputs")),
+            q3_root=_relative_path(base, get("LOCAL_RAG_Q3_ROOT", "runtime")),
             ingest_mode=get("LOCAL_RAG_INGEST_MODE", "multi").strip().lower(),
 
             profile_max_records=int(get("LOCAL_RAG_PROFILE_MAX_RECORDS", "40")),
@@ -124,6 +129,9 @@ class AppConfig:
             embedding_backend=get("LOCAL_RAG_EMBEDDING_BACKEND", "sentence_transformers_local").strip().lower(),
             embedding_batch_size=int(get("LOCAL_RAG_EMBEDDING_BATCH_SIZE", "16")),
             embedding_reserved_tokens=int(get("LOCAL_RAG_EMBEDDING_RESERVED_TOKENS", "8")),
+            embedding_device=get("LOCAL_RAG_EMBEDDING_DEVICE", "").strip(),
+            embedding_dtype=get("LOCAL_RAG_EMBEDDING_DTYPE", "").strip().lower(),
+            embedding_attention=get("LOCAL_RAG_EMBEDDING_ATTENTION", "").strip().lower(),
             retrieval_top_k=int(get("LOCAL_RAG_RETRIEVAL_TOP_K", "5")),
             retrieval_min_score=float(get("LOCAL_RAG_RETRIEVAL_MIN_SCORE", "0.30")),
             retrieval_context_max_records=int(
@@ -215,6 +223,12 @@ class AppConfig:
             raise ValueError("preprocessor_prompt_version cannot be blank")
         if self.embedding_backend != "sentence_transformers_local":
             raise ValueError("unsupported embedding backend")
+        if self.embedding_batch_size <= 0 or self.embedding_reserved_tokens < 0:
+            raise ValueError("invalid embedding batch size or reserved token count")
+        if self.embedding_dtype not in {"", "auto", "float16", "bfloat16", "float32"}:
+            raise ValueError("unsupported embedding dtype")
+        if self.embedding_attention not in {"", "eager", "sdpa", "flash_attention_2"}:
+            raise ValueError("unsupported embedding attention implementation")
         if self.llm_backend != "ollama" or self.vlm_backend != "ollama":
             raise ValueError("unsupported local model backend")
 

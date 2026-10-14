@@ -39,7 +39,7 @@ from .models import (
 from .snapshot import BuildWriter
 
 
-OUTPUT_ID_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}-\d{6}$")
+OUTPUT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 REVIEW_FILE_PATTERN = re.compile(r"^(\d+)_records\.pretty\.json$")
 
 
@@ -785,12 +785,21 @@ class PdfRagApplication:
                 return candidate
 
     def resolve_output(self, output_id: str) -> Path:
+        return self.resolve_configured_output(self.config.index_root, output_id)
+
+    @staticmethod
+    def resolve_configured_output(index_root: Path, output_id: str) -> Path:
+        """Resolve either a timestamp ingest output or a named importer output."""
         if not OUTPUT_ID_PATTERN.fullmatch(output_id):
-            raise ValueError("output must be a timestamp identifier")
-        root = self.config.index_root.resolve()
-        candidate = (root / output_id).resolve(strict=True)
+            raise ValueError(
+                "output id may contain only letters, numbers, '.', '_' and '-'"
+            )
+        root = index_root.resolve()
+        candidate = (root / output_id).resolve()
         if candidate.parent != root:
             raise ValueError("output escapes configured output root")
+        if not candidate.is_dir():
+            raise FileNotFoundError(f"output does not exist: {candidate}")
         return candidate
 
     @staticmethod
@@ -822,12 +831,18 @@ class PdfRagApplication:
             else [],
             reverse=True,
         )
+        failures: list[str] = []
         for _version, path in candidates:
             try:
                 FileVectorIndex.load(path, output_root=output_root)
                 return path
-            except Exception:
+            except Exception as error:
+                failures.append(f"{path.name}: {type(error).__name__}: {error}")
                 continue
+        if failures:
+            raise ValueError(
+                "output has no valid completed builds; " + " | ".join(failures)
+            )
         raise FileNotFoundError("output has no valid completed builds")
 
     @staticmethod

@@ -8,8 +8,7 @@
 
 ```powershell
 conda activate pdf2rag
-cd C:\ITRI\PDF2json\local_rag_mvp
- 
+cd <PATH_TO_PROJECT>
 python -m pip install -r requirements.txt
  
 conda install -c conda-forge poppler
@@ -43,6 +42,208 @@ python main.py build --output 2026-08-11_15-30-45-123456 --review 002
 
 # 使用指定 output 中最新的有效 build
 python main.py serve --output 2026-08-12_07-40-43-839095
+~~~
+
+### 原生 SuryaQ3 服務：`--serveq3`
+
+直接讀取 **目前 SuryaQ3 schema 1.2** 的單一 KB，不執行 q3Importer，
+不產生 build／embeddings.npy、不改寫 KB 或複製 crops。舊版 schema 1.0 不支援。
+
+在部署機的 `.env` 設定：
+
+```dotenv
+LOCAL_RAG_Q3_ROOT=runtime
+LOCAL_RAG_EMBEDDING_MODEL=/absolute/path/to/Qwen3-VL-Embedding-8B
+```
+
+```bash
+python main.py --serveq3 <KB name>
+```
+
+載入 `<LOCAL_RAG_Q3_ROOT>/<KB name>/knowledge_base/` 的 manifest、records、
+`vectors/text.npy`、`vectors/image.npy`、`embedding_inputs/metadata.json`，
+並在讀圖時直接存取 `crops/`。名稱不接受路徑；根目錄可透過設定搬移。
+其餘 session secret、管理密碼、Ollama、port、log 與既有 serve 相同。
+Query 使用本機 SentenceTransformer 的 `encode_query`；模型名稱（或 config 原始名稱）、
+維度必須匹配 KB，manifest 有 revision 時需可由本機 config／HF cache 驗證。
+`LOCAL_RAG_EMBEDDING_MODEL` 指向部署機位置，不直接使用來源主機的模型路徑。
+
+文字與圖片矩陣分開計算 cosine similarity，再合併排名；所有有效向量 records
+（包含 header/footer）皆參與搜尋，無向量 records 略過。沿用 Top-K、分數門檻與
+context records 上限，不新增檢索圖片張數上限。問題規劃僅作拆題及 query 產生，
+不依 profile 作範圍拒答，也不決定是否讀圖；命中的可讀圖片會直接送入回答流程。
+
+啟動僅作必要載入檢查，不做完整 checksum 稽核：核心 JSON／NPY 無法讀取、
+必要結構或模型不相容，以及沒有可搜尋 records 時停止啟動；個別無效 vector_ref
+排除並記錄錯誤。Crop 缺失、不可讀或引用不符時在使用時記錄錯誤，圖片 API 回傳
+404，回答不將該圖作為視覺證據。KB 在服務期間應保持不變，更新後需重啟。
+
+前端顯示 KB 名稱、由 headings/types 產生的建議問題，以及精確的 1-based 引用
+頁碼列表。原始 session JSONL 保存 KB、manifest hash、模型及檢索到的 record/vector
+對應；pretty JSON 保留 KB 名稱與可讀引用。既有 `serve --output` 與 q3Importer 保留。
+
+本功能在開發機僅作 AST、diff 與介面資料流靜態驗證，未啟動服務或執行測試／模型。
+部署端待驗收：混合檢索、命中圖片自動輸入、無向量略過、無效 row 排除、缺圖 404
+與回答降級、非連續頁碼、前端／log／監控及既有 serve 回歸。
+
+### q3Importer：匯入既有 Qwen3-VL Knowledge Records
+
+`q3Importer` 接受具備正式 Qwen3-VL artifacts 的 knowledge base。輸入可為
+embedding worker 的 run 目錄或其中的 `knowledge_base/`；可重複提供 `--input`，
+將多個知識庫整合成一個現行 `serve` 可載入的不可覆寫 build。Importer 不以
+`schema_version` 或 `mode` 標籤阻擋可相容資料。
+
+Importer 會強制驗證會影響搜尋正確性的 records、vectors 與代表 crop checksum，
+並檢查 record/vector counts、vector rows、model/revision/dimension/normalization
+與 preprocessing。不參與最終 build 的 metadata／overview checksum 會直接忽略；
+只要 metadata 的 image ID、vector row 與 crop reference 一致即可。沒有向量的
+`provenance_only` records 只列入報告，不進搜尋索引。Image record 必須透過
+`source_image_id` 與 `embedding_inputs/metadata.json` 指向代表 crop；不支援舊版
+直接使用 `metadata.crop` 的格式。
+
+若直接指定 `knowledge_base/`，仍須保留同一 run 上層的 `resolved_config.json`；
+除非 manifest 本身已包含 `preprocessing`。含圖片的來源必須保留 `crops/` 與
+`embedding_inputs/metadata.json`；只有實際匯入的代表 crop 必須有 manifest checksum。
+
+~~~bash
+python main.py q3Importer \
+  --input runtime/A_qwen3vl \
+  --input runtime/B_qwen3vl \
+  --output qwen3vl_combined \
+  --name "ITRI Qwen3-VL Knowledge Collection" \
+  --profile config/q3_profile.example.json
+
+# --profile 可省略；省略時依 heading、type 與 record 統計產生 deterministic profile。
+~~~
+
+`--profile` 格式可參考 `config/q3_profile.example.json`，只能覆寫摘要、topics、
+sections 等內容欄位；document ID、name、source 與 schema/version 由 importer 決定。
+
+產物固定為：
+
+~~~text
+runtime/outputs/qwen3vl_combined/
+├─ crops/
+└─ builds/001/
+   ├─ records.jsonl
+   ├─ embeddings.npy
+   ├─ corpus_profile.json
+   ├─ manifest.json
+   └─ build_report.json
+~~~
+
+Importer 沿用來源的預計算 vectors，不載入 embedding model 或呼叫 Ollama。
+輸入 vectors 會依 record 順序合併並轉成 serve 使用的單一 float32 matrix；來源
+record ID、KB ID、image ID、region IDs、source indexes 與 content types 會保留供
+引用追蹤。
+`--output` 若已存在會直接拒絕；來源或 profile 改變時請使用新的 output ID。
+
+#### 部署機安裝 Qwen3-VL query model
+
+Importer 只合併預先算好的 vectors，本身不需要載入模型；`serve` 才需要同一個
+Qwen3-VL embedding model 產生 query vector。本專案使用本機離線載入，因此請先在
+可連網的部署機下載完整模型：
+
+~~~bash
+conda activate pdf2rag-amd
+python -m pip install -r requirements.txt
+
+mkdir -p models
+hf download Qwen/Qwen3-VL-Embedding-8B \
+  --local-dir models/Qwen3-VL-Embedding-8B
+
+# 確認至少存在模型設定；這一步不會載入模型。
+test -f models/Qwen3-VL-Embedding-8B/config.json
+~~~
+
+模型來源為 [Qwen/Qwen3-VL-Embedding-8B](https://huggingface.co/Qwen/Qwen3-VL-Embedding-8B)，
+下載方式可參考 [Hugging Face CLI 文件](https://huggingface.co/docs/huggingface_hub/guides/download#download-from-the-cli)。
+若 `hf` 指令不存在，先執行：
+
+~~~bash
+python -m pip install --upgrade huggingface_hub
+~~~
+
+接著把 `.env` 的 model path 設為下載目錄的絕對路徑。CUDA 與 ROCm PyTorch 都使用
+`cuda` device 名稱：
+
+~~~dotenv
+LOCAL_RAG_EMBEDDING_MODEL=/absolute/path/to/Qwen3-VL-Embedding-8B
+LOCAL_RAG_EMBEDDING_DEVICE=cuda
+LOCAL_RAG_EMBEDDING_DTYPE=float16
+LOCAL_RAG_EMBEDDING_ATTENTION=sdpa
+LOCAL_RAG_EMBEDDING_BATCH_SIZE=1
+
+LOCAL_RAG_LLM_URL=http://localhost:11434
+LOCAL_RAG_LLM_MODEL=<Ollama回答模型>
+LOCAL_RAG_SESSION_SECRET=<隨機長字串>
+LOCAL_RAG_ADMIN_PASSWORD=<管理密碼>
+~~~
+
+若主機上已經有完整的同一模型，不必重複下載，直接填該模型目錄的絕對路徑即可。
+
+#### 32GB 單一內顯／UMA 記憶體注意事項
+
+本 serve 會讓 SentenceTransformer 的 Qwen3-VL embedding model 常駐，Ollama 在
+回答期間也會載入 Gemma。若 Gemma 實測約 18GB、Qwen 約 10GB 以上，兩者權重就已
+接近 28–30GB；再加上 KV cache、activations、ROCm allocator 與系統共用記憶體，
+32GB 單一 memory pool 高機率 OOM。
+
+優先方案：
+
+1. 若系統 RAM 足夠，將 query embedding 放在 CPU，避免占用 GPU/UMA 顯存：
+
+   ~~~dotenv
+   LOCAL_RAG_EMBEDDING_DEVICE=cpu
+   LOCAL_RAG_EMBEDDING_DTYPE=auto
+   LOCAL_RAG_EMBEDDING_BATCH_SIZE=1
+   ~~~
+
+   Query embedding 會變慢，但每次只處理少量 query，通常比兩個大型模型同駐安全。
+
+2. 若有第二張 GPU，將 Qwen 指定到另一裝置，例如 `cuda:1`。
+
+3. 必須共用 32GB GPU 時，降低 Gemma context，並同步讓 input budget 小於 context：
+
+   ~~~dotenv
+   LOCAL_RAG_LLM_CONTEXT_TOKENS=8192
+   LOCAL_RAG_ANSWER_INPUT_BUDGET_TOKENS=6144
+   ~~~
+
+   這只能降低 KV cache，無法消除兩套模型權重同時存在的峰值；若仍 OOM，應改用
+   CPU query embedding、較小的回答模型或增加可用記憶體。可用 `ollama ps` 查看
+   Gemma 的 `PROCESSOR` 與實際 context/offload 狀態。
+
+例如 repository 位於 `/home/r300_465035/文件/pdf2rag_itri`，則 model path 應為：
+
+~~~dotenv
+LOCAL_RAG_EMBEDDING_MODEL=/home/r300_465035/文件/pdf2rag_itri/models/Qwen3-VL-Embedding-8B
+~~~
+
+確認 Ollama 已在部署主機啟動後：
+
+~~~bash
+python main.py serve --output qwen3vl_combined
+~~~
+
+瀏覽 `http://127.0.0.1:8000`。若 query model dimension 與 build 不一致，serve
+會在啟動階段明確失敗，不會等到第一次查詢才報錯。
+
+部署機可執行下列驗收；開發 code 機禁止執行：
+
+~~~bash
+python -m unittest \
+  tests.test_q3_importer \
+  tests.test_embedding_runtime \
+  tests.test_rendering \
+  tests.test_http_chat
+
+python main.py q3Importer \
+  --input runtime/<run>_qwen3vl \
+  --output q3_smoke \
+  --name "Q3 Smoke Test"
+
+python main.py serve --output q3_smoke
 ~~~
 
 text、image、multi mode 分別控制 Stage 1 的文字與圖片支線。Stage 1/2 永遠不更新正式 RAG；只有 build 會在 output 內建立版本化索引。人工只修改 pending/NNN_records.pretty.json 中標示為 editable 的欄位，不直接修改 JSONL。
