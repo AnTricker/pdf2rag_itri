@@ -106,6 +106,29 @@ class SentenceTransformerEmbeddingBackend:
         return np.asarray(vectors, dtype=np.float32)
 
 
+class Q3QueryEmbeddingBackend(SentenceTransformerEmbeddingBackend):
+    """Use the model's trained query encoding path for native Q3 retrieval."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        if not callable(getattr(self.model, "encode_query", None)):
+            raise ValueError("Q3 query model does not support encode_query")
+
+    def embed(self, texts: list[str]) -> np.ndarray:
+        if any(self.count(text) > self.max_input_tokens for text in texts):
+            raise ValueError("embedding input exceeds configured token limit")
+        encode_query = getattr(self.model, "encode_query", None)
+        if not callable(encode_query):
+            raise ValueError("Q3 query model does not support encode_query")
+        vectors = np.asarray(encode_query(
+            texts, batch_size=self.batch_size, convert_to_numpy=True,
+            normalize_embeddings=True, show_progress_bar=False,
+        ), dtype=np.float32)
+        if vectors.shape != (len(texts), self.dimension) or not np.isfinite(vectors).all():
+            raise ValueError("Invalid Q3 query embeddings")
+        return vectors
+
+
 class UltralyticsImagePipeline:
     """Preserves the current YOLO/RT-DETR construction and predict kwargs."""
 

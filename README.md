@@ -44,6 +44,48 @@ python main.py build --output 2026-08-11_15-30-45-123456 --review 002
 python main.py serve --output 2026-08-12_07-40-43-839095
 ~~~
 
+### 原生 SuryaQ3 服務：`--serveq3`
+
+直接讀取 **目前 SuryaQ3 schema 1.2** 的單一 KB，不執行 q3Importer，
+不產生 build／embeddings.npy、不改寫 KB 或複製 crops。舊版 schema 1.0 不支援。
+
+在部署機的 `.env` 設定：
+
+```dotenv
+LOCAL_RAG_Q3_ROOT=runtime
+LOCAL_RAG_EMBEDDING_MODEL=/absolute/path/to/Qwen3-VL-Embedding-8B
+```
+
+```bash
+python main.py --serveq3 <KB name>
+```
+
+載入 `<LOCAL_RAG_Q3_ROOT>/<KB name>/knowledge_base/` 的 manifest、records、
+`vectors/text.npy`、`vectors/image.npy`、`embedding_inputs/metadata.json`，
+並在讀圖時直接存取 `crops/`。名稱不接受路徑；根目錄可透過設定搬移。
+其餘 session secret、管理密碼、Ollama、port、log 與既有 serve 相同。
+Query 使用本機 SentenceTransformer 的 `encode_query`；模型名稱（或 config 原始名稱）、
+維度必須匹配 KB，manifest 有 revision 時需可由本機 config／HF cache 驗證。
+`LOCAL_RAG_EMBEDDING_MODEL` 指向部署機位置，不直接使用來源主機的模型路徑。
+
+文字與圖片矩陣分開計算 cosine similarity，再合併排名；所有有效向量 records
+（包含 header/footer）皆參與搜尋，無向量 records 略過。沿用 Top-K、分數門檻與
+context records 上限，不新增檢索圖片張數上限。問題規劃僅作拆題及 query 產生，
+不依 profile 作範圍拒答，也不決定是否讀圖；命中的可讀圖片會直接送入回答流程。
+
+啟動僅作必要載入檢查，不做完整 checksum 稽核：核心 JSON／NPY 無法讀取、
+必要結構或模型不相容，以及沒有可搜尋 records 時停止啟動；個別無效 vector_ref
+排除並記錄錯誤。Crop 缺失、不可讀或引用不符時在使用時記錄錯誤，圖片 API 回傳
+404，回答不將該圖作為視覺證據。KB 在服務期間應保持不變，更新後需重啟。
+
+前端顯示 KB 名稱、由 headings/types 產生的建議問題，以及精確的 1-based 引用
+頁碼列表。原始 session JSONL 保存 KB、manifest hash、模型及檢索到的 record/vector
+對應；pretty JSON 保留 KB 名稱與可讀引用。既有 `serve --output` 與 q3Importer 保留。
+
+本功能在開發機僅作 AST、diff 與介面資料流靜態驗證，未啟動服務或執行測試／模型。
+部署端待驗收：混合檢索、命中圖片自動輸入、無向量略過、無效 row 排除、缺圖 404
+與回答降級、非連續頁碼、前端／log／監控及既有 serve 回歸。
+
 ### q3Importer：匯入既有 Qwen3-VL Knowledge Records
 
 `q3Importer` 接受具備正式 Qwen3-VL artifacts 的 knowledge base。輸入可為

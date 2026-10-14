@@ -17,6 +17,7 @@ class SessionJsonlLogger:
         "content_sha256",
         "document_sha256",
         "crop_url",
+        "vector_ref",
     }
 
     def __init__(self, root: Optional[Path], *, enabled: bool) -> None:
@@ -131,7 +132,7 @@ class SessionJsonlLogger:
             }:
                 diagnostics.append(cls._human_fields(event))
 
-        return {
+        document = {
             "session": {
                 "session_id": session_id,
                 "created_at_utc": events[0].get("timestamp_utc") if events else None,
@@ -141,6 +142,13 @@ class SessionJsonlLogger:
             "session_actions": session_actions,
             "diagnostics": diagnostics,
         }
+        knowledge_event = next((event for event in events if event.get("kb_name")), None)
+        if knowledge_event is not None:
+            document["knowledge_base"] = {
+                "source_mode": knowledge_event.get("source_mode"),
+                "kb_name": knowledge_event["kb_name"],
+            }
+        return document
 
     @classmethod
     def _human_fields(cls, value: Any) -> Any:

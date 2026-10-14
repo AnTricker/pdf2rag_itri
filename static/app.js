@@ -172,9 +172,11 @@ function appendMessage(role, content, citations = [], answerHtml = null, itemQue
         grid.appendChild(card);
         return;
       }
-      const pages = citation.page_start === citation.page_end
-        ? `第 ${citation.page_start} 頁`
-        : `第 ${citation.page_start}–${citation.page_end} 頁`;
+      const pages = Array.isArray(citation.page_numbers)
+        ? (citation.page_numbers.length ? `第 ${citation.page_numbers.join("、")} 頁` : "頁碼未提供")
+        : (citation.page_start === citation.page_end
+          ? `第 ${citation.page_start} 頁`
+          : `第 ${citation.page_start}–${citation.page_end} 頁`);
       heading.textContent = `[${index + 1}] ${citation.document_name}`;
       const location = document.createElement('div');
       location.className = 'citation-location';

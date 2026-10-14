@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 from pathlib import Path
 import sys
 from typing import Optional
@@ -12,12 +13,14 @@ from local_rag.adapters import (
     OllamaImageReviewBackend,
     PypdfTextExtractor,
     SentenceTransformerEmbeddingBackend,
+    Q3QueryEmbeddingBackend,
     UltralyticsImagePipeline,
 )
 from local_rag.application import ImageReviewIncompleteError, PdfRagApplication
 from local_rag.config import AppConfig
 from local_rag.doctor import run_doctor
 from local_rag.q3_importer import Q3Importer
+from local_rag.q3_index import Q3KnowledgeIndex
 from local_rag.serve_web import create_app
 
 
@@ -28,8 +31,9 @@ def read_prompt(name: str) -> str:
     return (BASE_DIR / "prompts" / name).read_text(encoding="utf-8")
 
 
-def embedding_backend(config: AppConfig) -> SentenceTransformerEmbeddingBackend:
-    return SentenceTransformerEmbeddingBackend(
+def embedding_backend(config: AppConfig, *, q3: bool = False) -> SentenceTransformerEmbeddingBackend:
+    backend = Q3QueryEmbeddingBackend if q3 else SentenceTransformerEmbeddingBackend
+    return backend(
         config.embedding_model,
         batch_size=config.embedding_batch_size,
         reserved_tokens=config.embedding_reserved_tokens,
@@ -97,7 +101,8 @@ def pipeline_application(
 
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Reviewable local PDF RAG pipeline")
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    parser.add_argument("--serveq3", metavar="KB_NAME")
+    subparsers = parser.add_subparsers(dest="command")
     subparsers.add_parser("doctor")
 
     ingest = subparsers.add_parser("ingest")
@@ -121,6 +126,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     serve.add_argument("--output", required=True)
 
     args = parser.parse_args(argv)
+    if args.serveq3 and args.command:
+        parser.error("--serveq3 cannot be combined with a subcommand")
+    if not args.serveq3 and not args.command:
+        parser.error("a subcommand or --serveq3 KB_NAME is required")
     config = AppConfig.from_env(BASE_DIR)
 
     if args.command == "doctor":
@@ -189,17 +198,28 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(build_path)
         return 0
 
-    if args.command == "serve":
+    if args.command == "serve" or args.serveq3:
         if not config.session_secret:
             raise ValueError("LOCAL_RAG_SESSION_SECRET is required for serve")
-        output_root = PdfRagApplication.resolve_configured_output(
-            config.index_root, args.output
-        )
-        build_root = PdfRagApplication.latest_build(output_root)
-        embedding = embedding_backend(config)
+        q3_index = None
+        if args.serveq3:
+            logging.basicConfig(level=logging.INFO)
+            q3_index = Q3KnowledgeIndex.load(
+                config.q3_root or config.base_dir / "runtime", args.serveq3,
+            )
+            output_root = q3_index.output_root
+            build_root = None
+        else:
+            output_root = PdfRagApplication.resolve_configured_output(
+                config.index_root, args.output
+            )
+            build_root = PdfRagApplication.latest_build(output_root)
+        embedding = embedding_backend(config, q3=q3_index is not None)
+        if q3_index is not None:
+            q3_index.validate_query_model(embedding)
         chat = OllamaChatBackend(
             config,
-            splitter_prompt=read_prompt("query_planner_v1.txt"),
+            splitter_prompt=read_prompt("q3_query_planner_v1.txt" if q3_index is not None else "query_planner_v1.txt"),
             admission_prompt=read_prompt("query_admission_v2.txt"),
             query_builder_prompt=read_prompt("retrieval_query_builder_v2.txt"),
             evidence_draft_prompt=read_prompt("evidence_draft_v1.txt"),
@@ -213,6 +233,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 chat_backend=chat,
                 build_root=build_root,
                 output_root=output_root,
+                index=q3_index,
             )
             from waitress import serve
 

@@ -26,6 +26,7 @@ def _boolean(value: str) -> bool:
 class AppConfig:
     base_dir: Path
     index_root: Path
+    q3_root: Optional[Path] = None
     ingest_mode: str = "multi"
     profile_max_records: int = 40
     input_pdf: Optional[Path] = None
@@ -106,6 +107,7 @@ class AppConfig:
             upload_max_pixels=int(get('LOCAL_RAG_UPLOAD_MAX_PIXELS', '20000000')),
             base_dir=base,
             index_root=_relative_path(base, get("LOCAL_RAG_INDEX_ROOT", "runtime/outputs")),
+            q3_root=_relative_path(base, get("LOCAL_RAG_Q3_ROOT", "runtime")),
             ingest_mode=get("LOCAL_RAG_INGEST_MODE", "multi").strip().lower(),
 
             profile_max_records=int(get("LOCAL_RAG_PROFILE_MAX_RECORDS", "40")),

@@ -3,16 +3,32 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional, Protocol
 
 import numpy as np
 
 from .models import CorpusProfile, KnowledgeRecord, SnapshotManifest
 
 
+class RetrievalRecord(Protocol):
+    """Read-only interface shared by build records and native Q3 views."""
+
+    @property
+    def record_id(self) -> str: ...
+
+    @property
+    def modality(self) -> str: ...
+
+    @property
+    def content(self) -> str: ...
+
+    @property
+    def source(self) -> Any: ...
+
+
 @dataclass(frozen=True)
 class SearchHit:
-    record: KnowledgeRecord
+    record: RetrievalRecord
     score: float
     selection_reason: str = "semantic"
 
@@ -91,6 +107,14 @@ class FileVectorIndex:
             manifest=manifest,
             corpus_profile=corpus_profile,
         )
+
+    def resolve_crop(self, record) -> Optional[Path]:
+        relative = record.source.artifact_path
+        if not relative:
+            return None
+        candidate = (self.output_root / relative).resolve()
+        crops_root = (self.output_root / "crops").resolve()
+        return candidate if crops_root in candidate.parents and candidate.is_file() else None
 
     @staticmethod
     def _sha256(path: Path) -> str:

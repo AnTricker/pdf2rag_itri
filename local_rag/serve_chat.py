@@ -144,7 +144,8 @@ class ServeChatEngine:
         history = [pair.model_dump() for pair in session.qa_history]
         attachment_data = [item.metadata.model_dump() for item in attachments]
         self.session_logger.append(session_id, 'request_received', latest_input=latest_input,
-                                   attachments=attachment_data)
+                                   attachments=attachment_data,
+                                   **getattr(self.index, 'log_context', {}))
         self._check_cancelled(cancelled)
         if not self._security_pattern.search(latest_input):
             self._ensure_model(session_id, progress, cancelled)
@@ -161,14 +162,18 @@ class ServeChatEngine:
             if item.route == 'security_request':
                 results[index] = self._fixed_item(item.question, item.route, self.security_answer)
                 continue
-            if item.route == 'out_of_scope':
+            if item.route == 'out_of_scope' and not getattr(self.index, 'direct_retrieval', False):
                 results[index] = self._fixed_item(item.question, item.route, self.out_of_scope_answer)
                 continue
-            hits = self._retrieve(item)
+            hits = self._retrieve(item, session_id)
             if not hits and not attachments:
                 results[index] = self._insufficient_item(item.question)
                 continue
-            records = self._record_blocks(hits)
+            use_crops = getattr(self.index, "direct_retrieval", False) or item.needs_visual_context
+            crop_paths = self._crop_paths(hits, session_id) if use_crops else []
+            records = self._record_blocks(
+                hits, crop_paths if getattr(self.index, "direct_retrieval", False) else None,
+            )
             evidence[index] = hits
             answer_inputs.append({
                 'item_index': index,
@@ -177,8 +182,7 @@ class ServeChatEngine:
                 'attachment_names': [entry.metadata.name for entry in attachments],
             })
             paths = [entry.path for entry in attachments]
-            if item.needs_visual_context:
-                paths.extend(self._crop_paths(hits))
+            paths.extend(crop_paths)
             image_paths[index] = self._deduplicated_paths(paths)
 
         batches = self._batches(answer_inputs)
@@ -264,10 +268,16 @@ class ServeChatEngine:
                 question=latest_input, route='security_request', queries=[]
             )])
         try:
-            return self.chat_backend.plan(
+            plan = self.chat_backend.plan(
                 latest_input, history, self.index.corpus_profile,
                 trace=self._trace(session_id),
             )
+            if getattr(self.index, "direct_retrieval", False):
+                for item in plan.items:
+                    if item.route == "out_of_scope":
+                        item.route = "document_question"
+                        item.queries = item.queries or [item.question]
+            return plan
         except (KeyError, ValueError) as error:
             self.session_logger.append(session_id, 'planner_fallback', reason=str(error))
             return QueryPlan(items=[QueryPlanItem(
@@ -275,7 +285,7 @@ class ServeChatEngine:
                 queries=[latest_input], needs_visual_context=False,
             )])
 
-    def _retrieve(self, item: QueryPlanItem) -> list:
+    def _retrieve(self, item: QueryPlanItem, session_id=None) -> list:
         queries = self._clean_texts([item.question, *item.queries])[:3]
         if not queries:
             queries = [item.question]
@@ -286,7 +296,19 @@ class ServeChatEngine:
             per_query_hits.append([
                 hit for hit in hits if hit.score >= self.config.retrieval_min_score
             ])
-        return self._round_robin_hits(per_query_hits, self.config.retrieval_context_max_records)
+        hits = self._round_robin_hits(per_query_hits, self.config.retrieval_context_max_records)
+        if getattr(self.index, "direct_retrieval", False):
+            self.session_logger.append(
+                session_id, "retrieval_completed", queries=queries,
+                hits=[{
+                    "source_record_id": hit.record.record_id,
+                    "vector_ref": dict(hit.record.source.vector_ref), "score": hit.score,
+                    "page_numbers": list(hit.record.source.page_numbers),
+                    "section_path": list(hit.record.source.section_path),
+                    "content_types": list(hit.record.source.content_types),
+                } for hit in hits], **self.index.log_context,
+            )
+        return hits
 
     def _apply_answer_batch(self, session_id, batch, paths, evidence, results) -> None:
         try:
@@ -346,21 +368,22 @@ class ServeChatEngine:
             batches.append(current)
         return batches
 
-    def _crop_paths(self, hits) -> list[Path]:
+    def _crop_paths(self, hits, session_id=None) -> list[Path]:
         paths = []
         for hit in hits:
-            artifact = hit.record.source.artifact_path
-            if not artifact:
-                continue
-            candidate = (self.index.output_root / artifact).resolve()
-            crops_root = (self.index.output_root / 'crops').resolve()
-            if crops_root in candidate.parents and candidate.is_file():
+            candidate = self.index.resolve_crop(hit.record)
+            if candidate is not None:
                 paths.append(candidate)
+            elif getattr(self.index, 'direct_retrieval', False) and hit.record.modality == 'image':
+                self.session_logger.append(
+                    session_id, 'crop_unavailable', record_id=hit.record.record_id,
+                    **self.index.log_context,
+                )
         return paths
 
     @staticmethod
-    def _record_blocks(hits) -> list[dict[str, object]]:
-        return [
+    def _record_blocks(hits, visual_paths=None) -> list[dict[str, object]]:
+        blocks = [
             {
                 'source_number': index,
                 'modality': hit.record.modality,
@@ -375,6 +398,16 @@ class ServeChatEngine:
             }
             for index, hit in enumerate(hits, start=1)
         ]
+        if visual_paths is not None:
+            available = {path.name for path in visual_paths}
+            for block, hit in zip(blocks, hits):
+                block["page_numbers"] = list(hit.record.source.page_numbers)
+                if hit.record.modality == "image":
+                    block["image_available"] = block["artifact_name"] in available
+                    if not block["image_available"]:
+                        block["artifact_name"] = None
+                        block["content"] = "圖片檔無法讀取；此區塊不可作為視覺證據。"
+        return blocks
 
     @staticmethod
     def _round_robin_hits(per_query_hits, limit: int) -> list:
@@ -419,6 +452,10 @@ class ServeChatEngine:
                 'source_image_id': getattr(source, 'source_image_id', None),
                 'crop_url': f'/api/crops/{hit.record.record_id}' if artifact else None,
                 'score': hit.score,
+                **({
+                    "page_numbers": list(source.page_numbers),
+                    "vector_ref": dict(source.vector_ref),
+                } if hasattr(source, "vector_ref") else {}),
             })
         return citations
 

@@ -82,7 +82,7 @@ class UploadValidationError(ValueError):
 
 
 def create_app(*, config, embedding_backend, chat_backend,
-               build_root: Path, output_root: Path, tts_client=None) -> Flask:
+               build_root: Path | None, output_root: Path, tts_client=None, index=None) -> Flask:
     if not config.session_secret:
         raise ValueError('LOCAL_RAG_SESSION_SECRET is required for serve')
     if not config.admin_password:
@@ -96,7 +96,8 @@ def create_app(*, config, embedding_backend, chat_backend,
     stream_signer = URLSafeTimedSerializer(config.session_secret, salt='local-rag-stream-v1')
     admin_signer = URLSafeTimedSerializer(config.session_secret, salt='local-rag-admin-v1')
     monitoring = MonitoringStore(config.monitoring_db_path, config.access_log_root)
-    index = FileVectorIndex.load(build_root, output_root=output_root)
+    if index is None:
+        index = FileVectorIndex.load(build_root, output_root=output_root)
     if embedding_backend.dimension != index.manifest.vector_dimension:
         raise ValueError(
             "query embedding dimension does not match the loaded knowledge build"
@@ -116,7 +117,9 @@ def create_app(*, config, embedding_backend, chat_backend,
     upload_root = (config.log_root or config.base_dir / 'runtime' / 'logs') / 'chat_uploads'
     _cleanup_stale_uploads(upload_root, config.job_retention_seconds)
     artifact_records = {record.record_id: record for record in index.records
-                        if record.source.artifact_path}
+                        if record.source.artifact_path or (
+                            getattr(index, "direct_retrieval", False) and record.modality == "image"
+                        )}
     app.extensions['chat_job_manager'] = jobs
     app.extensions['monitoring_store'] = monitoring
     tts_client_instance = tts_client
@@ -278,7 +281,8 @@ def create_app(*, config, embedding_backend, chat_backend,
         return render_template('index.html', upload_max_files=config.upload_max_files,
                                upload_max_file_mb=config.upload_max_file_bytes // (1024 * 1024),
                                upload_max_total_mb=config.upload_max_total_bytes // (1024 * 1024),
-                               suggested_questions=SUGGESTED_QUESTIONS,
+                               kb_name=getattr(index, "kb_name", None),
+                               suggested_questions=getattr(index, "suggested_questions", SUGGESTED_QUESTIONS),
                                tts_options=TTS_OPTIONS)
 
     @app.get('/api/health')
@@ -602,11 +606,8 @@ def create_app(*, config, embedding_backend, chat_backend,
     @app.get('/api/crops/<record_id>')
     def crop(record_id: str):
         record = artifact_records.get(record_id)
-        if record is None or record.source.artifact_path is None:
-            return jsonify(error_code='crop_not_found', message='圖片不存在'), 404
-        candidate = (index.output_root / record.source.artifact_path).resolve()
-        crops_root = (index.output_root / 'crops').resolve()
-        if crops_root not in candidate.parents or not candidate.is_file():
+        candidate = index.resolve_crop(record) if record is not None else None
+        if candidate is None:
             return jsonify(error_code='crop_not_found', message='圖片不存在'), 404
         return send_file(candidate, conditional=True)
 
@@ -697,6 +698,9 @@ def _markdown_report(*, session_id: str, created_at: str, exported_at: str,
                     start = citation.get('page_start')
                     end = citation.get('page_end')
                     pages = f'第 {start} 頁' if start == end else f'第 {start}~{end} 頁'
+                    if 'page_numbers' in citation:
+                        numbers = citation['page_numbers']
+                        pages = ('第 ' + '、'.join(str(p) for p in numbers) + ' 頁') if numbers else '頁碼未提供'
                     details = []
                     section = citation.get('section_path') or []
                     if section:
