@@ -1,0 +1,8 @@
+surya2:
+  version: "surya-ocr>=0.20,<1"
+  environment: "digital-pdf-surya"
+  command:
+    - "surya_ocr"
+    - "{input_dir}"
+    - "--output_dir"
+    - "{output_dir}"

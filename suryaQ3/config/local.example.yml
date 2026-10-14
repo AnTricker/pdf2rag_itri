@@ -1,0 +1,23 @@
+# Copy this file to config/local.yml for host-specific overrides.
+# config/local.yml is ignored by Git and loaded after the shipped defaults.
+embedding:
+  # Reserved for process recycling. The current pipeline does not consume this
+  # setting yet; resume a failed run manually with --resume-from.
+  image_worker:
+    max_images_per_process: 250
+  modes:
+    qwen3vl:
+      # Hugging Face model ID or an absolute local SentenceTransformer model directory.
+      # model_id: /absolute/path/to/Qwen3-VL-Embedding-8B
+      runtime:
+        device: cuda
+        dtype: float16
+        attention: sdpa
+        batch_size: 1
+
+embedding_preprocess:
+  image_preprocess:
+    factor: 32
+    patch_size: 16
+    min_pixels: 4096
+    max_pixels: 1310720

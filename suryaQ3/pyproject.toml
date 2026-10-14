@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "digital-pdf-toolkit"
+version = "0.1.0"
+description = "Native PDF extraction, Surya OCR, Marker analysis, and scan conversion tools"
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+  "PyMuPDF>=1.26,<2",
+  "pdfplumber>=0.11,<1",
+  "Pillow>=10,<13",
+  "pillow-heif>=1,<2",
+  "PyYAML>=6,<7",
+]
+
+[project.optional-dependencies]
+embedding = [
+  "beautifulsoup4>=4.12,<5",
+  "numpy>=2,<3",
+  "sentence-transformers[image]>=5,<6",
+]
+test = ["pytest>=8,<9", "beautifulsoup4>=4.12,<5", "numpy>=2,<3"]
+
+[project.scripts]
+digital-pdf-toolkit = "digital_pdf_toolkit.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

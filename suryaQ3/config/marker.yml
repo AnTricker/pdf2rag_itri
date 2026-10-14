@@ -1,0 +1,14 @@
+marker:
+  version: "marker-pdf>=2,<3"
+  environment: "digital-pdf-marker"
+  mode: "balanced"
+  inference_backend: "llamacpp"
+  command:
+    - "python"
+    - "{worker_script}"
+    - "{input_pdf}"
+    - "{output_dir}"
+    - "--mode"
+    - "{mode}"
+    - "--inference-backend"
+    - "{inference_backend}"
